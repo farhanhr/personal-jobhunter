@@ -1,5 +1,6 @@
 import { useEffect, useState } from 'react'
 import { fetchHealth, type HealthResponse } from './api/health'
+import { SearchRunPanel } from './components/SearchRunPanel'
 import { TargetRolesSettings } from './components/TargetRolesSettings'
 import './App.css'
 
@@ -76,6 +77,8 @@ function App() {
           </>
         )}
       </section>
+
+      <SearchRunPanel />
 
       <TargetRolesSettings />
 

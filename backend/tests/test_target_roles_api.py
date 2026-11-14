@@ -17,8 +17,20 @@ LOCAL_ORIGIN = "http://127.0.0.1:5173"
 NOW = datetime(2026, 11, 13, 10, 0, tzinfo=JAKARTA)
 
 
+class _AvailableConnector:
+    source_id = "company_1"
+
+
+def _available_connectors(_snapshot):
+    return [_AvailableConnector()]
+
+
 def _client(engine: Engine) -> TestClient:
-    app = create_app(engine=engine, clock=lambda: NOW)
+    app = create_app(
+        engine=engine,
+        clock=lambda: NOW,
+        connector_factory=_available_connectors,
+    )
     return TestClient(app, base_url="http://127.0.0.1:8000")
 
 

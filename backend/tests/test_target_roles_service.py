@@ -24,6 +24,14 @@ from personal_job_finder_api.settings.service import TargetRoleService
 FIXED_NOW = datetime(2026, 11, 13, 10, 0, tzinfo=UTC)
 
 
+class _AvailableConnector:
+    source_id = "company_1"
+
+
+def _available_connectors(_snapshot):
+    return [_AvailableConnector()]
+
+
 def _service(engine: Engine, now: datetime = FIXED_NOW) -> TargetRoleService:
     return TargetRoleService(engine, clock=lambda: now)
 
@@ -142,6 +150,33 @@ def test_full_replacement_removes_omitted_roles_and_keeps_retained_id(
     stored = _stored_rows(engine)
     assert len(stored) == 1
     assert stored[0]["role_id"] == retained.role_id
+
+
+def test_full_replacement_preserves_disabled_roles_outside_management_scope(
+    engine: Engine,
+) -> None:
+    now = format_utc(FIXED_NOW)
+    with engine.begin() as connection:
+        connection.execute(
+            target_roles.insert().values(
+                role_id="role_disabled",
+                canonical_name="Legacy Data Analyst",
+                aliases_json='["Legacy Analyst"]',
+                excluded_terms_json="[]",
+                seniority_json=None,
+                enabled=False,
+                created_at_utc=now,
+                updated_at_utc=now,
+            )
+        )
+
+    _service(engine).replace_roles([TargetRoleDraft("Backend Engineer")])
+
+    rows = {row["canonical_name"]: row for row in _stored_rows(engine)}
+    assert rows["Legacy Data Analyst"]["role_id"] == "role_disabled"
+    assert rows["Legacy Data Analyst"]["enabled"] == 0
+    assert rows["Backend Engineer"]["enabled"] == 1
+    assert len(rows) == 2
 
 
 def test_more_than_three_roles_is_rejected_without_changing_saved_state(
@@ -313,13 +348,21 @@ def test_policy_uses_persisted_role_configuration(
     roles = _service(engine, now)
 
     roles.replace_roles([TargetRoleDraft("Backend Engineer")])
-    allowed = SearchPolicyService(engine, clock=lambda: now).evaluate()
+    allowed = SearchPolicyService(
+        engine,
+        connector_factory=_available_connectors,
+        clock=lambda: now,
+    ).evaluate()
 
     assert allowed.allowed is True
     assert allowed.blocking_reasons == ()
 
     roles.replace_roles([])
-    blocked = SearchPolicyService(engine, clock=lambda: now).evaluate()
+    blocked = SearchPolicyService(
+        engine,
+        connector_factory=_available_connectors,
+        clock=lambda: now,
+    ).evaluate()
 
     assert blocked.allowed is False
     assert blocked.blocking_reasons == (BlockingReason.NO_TARGET_ROLES,)

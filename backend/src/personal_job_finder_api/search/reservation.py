@@ -80,8 +80,8 @@ class SearchReservationService:
         self._run_id_factory = run_id_factory or (lambda: f"run_{uuid.uuid4().hex}")
 
     def reserve(self, request: ReservationRequest) -> ReservationOutcome:
-        idempotency_key = _normalize_idempotency_key(request.idempotency_key)
-        request_fingerprint = _fingerprint_payload(request.payload)
+        idempotency_key = normalize_idempotency_key(request.idempotency_key)
+        request_fingerprint = fingerprint_payload(request.payload)
         now = ensure_aware_utc(self._clock(), "clock")
 
         with immediate_transaction(self._engine) as connection:
@@ -143,7 +143,7 @@ class SearchReservationService:
         )
 
 
-def _normalize_idempotency_key(value: str) -> str:
+def normalize_idempotency_key(value: str) -> str:
     if not value or not value.strip():
         raise InvalidIdempotencyKey("idempotency key is required")
     try:
@@ -153,7 +153,7 @@ def _normalize_idempotency_key(value: str) -> str:
     return str(parsed)
 
 
-def _fingerprint_payload(payload: Mapping[str, Any]) -> str:
+def fingerprint_payload(payload: Mapping[str, Any]) -> str:
     try:
         canonical = json.dumps(
             payload,

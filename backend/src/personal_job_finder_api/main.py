@@ -19,6 +19,10 @@ from personal_job_finder_api.core.config import Settings, settings
 from personal_job_finder_api.core.time import utc_now
 from personal_job_finder_api.db.engine import create_database_engine
 from personal_job_finder_api.db.migrate import run_migrations
+from personal_job_finder_api.search.connectors import (
+    ConnectorFactory,
+    default_connector_factory,
+)
 from personal_job_finder_api.search.recovery import recover_interrupted_runs
 
 
@@ -27,6 +31,7 @@ def create_app(
     app_settings: Settings | None = None,
     engine: Engine | None = None,
     clock: Callable[[], datetime] = utc_now,
+    connector_factory: ConnectorFactory = default_connector_factory,
 ) -> FastAPI:
     resolved_settings = app_settings or settings
 
@@ -45,6 +50,7 @@ def create_app(
         app.state.engine = db_engine
         app.state.clock = clock
         app.state.settings = resolved_settings
+        app.state.connector_factory = connector_factory
 
         try:
             recover_interrupted_runs(db_engine, now=clock())
@@ -60,6 +66,7 @@ def create_app(
     )
     install_error_handlers(app)
     app.state.settings = resolved_settings
+    app.state.connector_factory = connector_factory
     app.include_router(api_router, prefix=resolved_settings.api_v1_prefix)
     return app
 

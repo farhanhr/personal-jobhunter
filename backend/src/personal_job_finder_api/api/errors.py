@@ -19,11 +19,13 @@ class ApiError(Exception):
         code: str,
         message: str,
         details: dict[str, Any] | None = None,
+        headers: dict[str, str] | None = None,
     ) -> None:
         self.status_code = status_code
         self.code = code
         self.message = message
         self.details = details or {}
+        self.headers = headers or {}
         super().__init__(message)
 
 
@@ -36,6 +38,7 @@ def install_error_handlers(app: FastAPI) -> None:
             code=exc.code,
             message=exc.message,
             details=exc.details,
+            headers=exc.headers,
         )
 
     @app.exception_handler(RequestValidationError)
@@ -67,10 +70,13 @@ def _error_response(
     code: str,
     message: str,
     details: dict[str, Any],
+    headers: dict[str, str] | None = None,
 ) -> JSONResponse:
     request_id = getattr(request.state, "request_id", None) or f"req_{uuid.uuid4().hex}"
+    response_headers = {"Cache-Control": "no-store", **(headers or {})}
     return JSONResponse(
         status_code=status_code,
+        headers=response_headers,
         content={
             "error": {
                 "code": code,

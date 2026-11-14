@@ -65,7 +65,7 @@ class TargetRoleRepository:
         connection: Connection,
         records: tuple[TargetRoleRecord, ...],
     ) -> None:
-        connection.execute(target_roles.delete())
+        connection.execute(target_roles.delete().where(target_roles.c.enabled.is_(True)))
         if not records:
             return
 

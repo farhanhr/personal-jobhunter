@@ -7,7 +7,7 @@ from dataclasses import dataclass
 from datetime import date, datetime
 from typing import Any
 
-from sqlalchemy import and_, func, or_, select
+from sqlalchemy import and_, func, or_, select, update
 from sqlalchemy.engine import Connection
 
 from personal_job_finder_api.core.time import format_utc, parse_utc
@@ -145,6 +145,60 @@ class SearchPolicyRepository:
                 source_summary_json=run.source_summary_json,
             )
         )
+
+    def mark_running(
+        self,
+        connection: Connection,
+        run_id: str,
+        *,
+        started_at: datetime,
+    ) -> bool:
+        """Claim an accepted run for this process; return False if already claimed."""
+
+        result = connection.execute(
+            update(search_runs)
+            .where(
+                search_runs.c.run_id == run_id,
+                search_runs.c.status == RunStatus.ACCEPTED.value,
+            )
+            .values(
+                status=RunStatus.RUNNING.value,
+                started_at_utc=format_utc(started_at),
+            )
+        )
+        return result.rowcount == 1
+
+    def finish_run(
+        self,
+        connection: Connection,
+        run_id: str,
+        *,
+        status: RunStatus,
+        finished_at: datetime,
+        error_summary: str | None,
+        progress_json: str,
+        source_summary_json: str,
+    ) -> bool:
+        """Persist a terminal state for a running run."""
+
+        if status.is_active:
+            raise ValueError("finish_run requires a terminal status")
+
+        result = connection.execute(
+            update(search_runs)
+            .where(
+                search_runs.c.run_id == run_id,
+                search_runs.c.status == RunStatus.RUNNING.value,
+            )
+            .values(
+                status=status.value,
+                finished_at_utc=format_utc(finished_at),
+                error_summary=error_summary,
+                progress_json=progress_json,
+                source_summary_json=source_summary_json,
+            )
+        )
+        return result.rowcount == 1
 
     def load_configuration_snapshot(self, connection: Connection) -> dict[str, Any]:
         role_rows = (

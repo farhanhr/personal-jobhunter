@@ -13,6 +13,23 @@ const emptySettingsPayload = {
   max_target_roles: 3,
 }
 
+const blockedPolicyPayload = {
+  timezone: 'Asia/Jakarta',
+  operational_day: '2026-11-12',
+  max_runs: 2,
+  accepted_runs: 0,
+  remaining_runs: 2,
+  last_accepted_at: null,
+  cooldown_until: null,
+  cooldown_remaining_seconds: 0,
+  next_eligible_at: null,
+  next_reset_at: '2026-11-12T23:00:00Z',
+  has_active_run: false,
+  can_start: false,
+  block_reason: 'no_usable_source',
+  blocking_reasons: ['no_usable_source'],
+}
+
 function mockResponse(body: unknown, ok = true): Response {
   return {
     ok,
@@ -30,6 +47,9 @@ function mockApiFetch(healthResponse: Response = mockResponse(healthyPayload)) {
     }
     if (url === '/api/v1/settings/search') {
       return Promise.resolve(mockResponse(emptySettingsPayload))
+    }
+    if (url === '/api/v1/search-policy') {
+      return Promise.resolve(mockResponse(blockedPolicyPayload))
     }
 
     return Promise.reject(new Error(`Unexpected fetch request: ${url}`))
@@ -64,6 +84,9 @@ describe('App', () => {
     expect(screen.getByText('Version 0.1.0')).toBeInTheDocument()
     expect(
       await screen.findByRole('heading', { name: /target roles/i }),
+    ).toBeInTheDocument()
+    expect(
+      await screen.findByRole('heading', { name: /manual search/i }),
     ).toBeInTheDocument()
   })
 

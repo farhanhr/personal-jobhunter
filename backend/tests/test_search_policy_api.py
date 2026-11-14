@@ -14,12 +14,28 @@ from sqlalchemy import Engine
 from personal_job_finder_api.core.config import Settings
 from personal_job_finder_api.db.tables import search_runs
 from personal_job_finder_api.main import create_app
+from personal_job_finder_api.search.connectors import SourceRunResult, SourceRunStatus
 from personal_job_finder_api.search.reservation import (
     ReservationRequest,
     SearchReservationService,
 )
 
 JAKARTA = ZoneInfo("Asia/Jakarta")
+
+
+class _AvailableConnector:
+    source_id = "company_1"
+
+    def run(self) -> SourceRunResult:  # pragma: no cover - policy never runs it
+        return SourceRunResult(
+            source_id=self.source_id,
+            status=SourceRunStatus.COMPLETED,
+            records_found=0,
+        )
+
+
+def _available_connectors(_snapshot):
+    return [_AvailableConnector()]
 
 
 def wib(
@@ -34,7 +50,11 @@ def wib(
 
 
 def _client(engine: Engine, now: datetime) -> TestClient:
-    app = create_app(engine=engine, clock=lambda: now)
+    app = create_app(
+        engine=engine,
+        clock=lambda: now,
+        connector_factory=_available_connectors,
+    )
     return TestClient(app)
 
 
@@ -148,15 +168,6 @@ def test_startup_recovery_marks_stale_run_interrupted(
             sa.select(search_runs.c.status).where(search_runs.c.run_id == "run_existing")
         ).scalar_one()
     assert status == "interrupted"
-
-
-def test_no_start_run_endpoint_exists_in_m1(engine: Engine, seed_config) -> None:
-    seed_config()
-
-    with _client(engine, wib(2026, 11, 12, 12, 0)) as client:
-        response = client.post("/api/v1/search-runs", json={})
-
-    assert response.status_code == 404
 
 
 def test_health_endpoint_is_preserved(engine: Engine) -> None:

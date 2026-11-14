@@ -57,6 +57,7 @@ class SearchPolicyResponse(BaseModel):
 def get_search_policy_service(request: Request) -> SearchPolicyService:
     return SearchPolicyService(
         request.app.state.engine,
+        connector_factory=request.app.state.connector_factory,
         clock=request.app.state.clock,
     )
 
