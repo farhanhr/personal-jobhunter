@@ -1,0 +1,105 @@
+# Environment files and local secrets
+.env
+.env.*
+!.env.example
+!.env.template
+**/.env
+**/.env.*
+!**/.env.example
+
+# Local credentials, tokens, key material
+credentials/
+**/credentials/
+secrets/
+**/secrets/
+*.pem
+*.key
+*.p12
+*.pfx
+*.crt
+*client_secret*.json
+*oauth-client*.json
+*oauth_client*.json
+*service-account*.json
+*service_account*.json
+*token*.json
+*credentials*.json
+
+# User-specific search configuration
+/config/search.local.yaml
+/config/search.local.yml
+/config/*.private.yaml
+/config/*.private.yml
+
+# Local/private data, database and runtime artifacts
+/data/
+/exports/
+/runtime/
+/local/
+*.db
+*.sqlite
+*.sqlite3
+*.db-journal
+*.db-wal
+*.db-shm
+*.sqlite-journal
+*.sqlite-wal
+*.sqlite-shm
+*.sqlite3-journal
+*.sqlite3-wal
+*.sqlite3-shm
+*.log
+logs/
+
+# Personal exports and documents that must never be published
+*.csv
+*.xls
+*.xlsx
+*.pdf
+*.doc
+*.docx
+
+# Python
+.venv/
+venv/
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+
+# Node / frontend build
+node_modules/
+dist/
+build/
+coverage/
+.vite/
+
+# Editors / OS
+.vscode/
+.idea/
+*.swp
+.DS_Store
+Thumbs.db
+
+# Browser automation artifacts - local test data only
+playwright/.auth/
+.auth/
+browser-profile/
+user-data-dir/
+
+# Local AI / agent runtime state
+.opencode/cache/
+.opencode/logs/
+.agent-runtime/
+.opencode/
+# Keep reviewed project skills trackable; other local agent state stays ignored.
+.agents/*
+!.agents/skills/
+scripts/
+opencode.jsonc
+patches/
+PUBLICATION_GATES.md
+APPLY_PATCH.md

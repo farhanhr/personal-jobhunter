@@ -1,0 +1,38 @@
+# Generic public example only.
+# Runtime search configuration is authoritative in local SQLite (ADR-014).
+# This file documents a possible bootstrap/export shape; it is not a runtime source of truth.
+schema_version: 1
+
+target_roles:
+  max_items: 3
+  items:
+    - role_id: role-one
+      display_name: "Replace with target role 1"
+      aliases: []
+      excluded_keywords: []
+    # Add up to two more primary roles. Do not exceed max_items.
+
+location:
+  country_code: ID
+  country_name: Indonesia
+  scope: indonesia
+  selected_provinces: []
+  selected_cities: []
+  include_remote: true
+  remote_policy: indonesia_eligible_only
+  unknown_location_policy: review
+
+search_policy:
+  trigger: manual
+  max_runs_per_operational_day: 2
+  cooldown_hours: 12
+  reset_time_local: "06:00"
+  timezone: Asia/Jakarta
+  max_concurrent_runs: 1
+
+sources:
+  company_career_pages: []
+  linkedin:
+    mode: manual_post_import_only
+    browser_automation: false
+    fetch_post_url: false

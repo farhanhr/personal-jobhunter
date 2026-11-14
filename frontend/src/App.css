@@ -1,0 +1,138 @@
+:root {
+  --page-bg: #0f172a;
+  --card-bg: #ffffff;
+  --text: #1e293b;
+  --muted: #64748b;
+  --border: #e2e8f0;
+  --accent: #0f766e;
+  --ok-bg: #ecfdf5;
+  --ok-border: #6ee7b7;
+  --warn-bg: #fff7ed;
+  --warn-border: #fdba74;
+  --pending-bg: #eff6ff;
+  --pending-border: #93c5fd;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+body {
+  margin: 0;
+  min-height: 100vh;
+  font-family:
+    Inter, ui-sans-serif, system-ui, -apple-system, 'Segoe UI', sans-serif;
+  color: var(--text);
+  background:
+    radial-gradient(circle at top left, #1e293b 0%, transparent 45%),
+    radial-gradient(circle at bottom right, #134e4a 0%, transparent 40%),
+    var(--page-bg);
+}
+
+#root {
+  min-height: 100vh;
+  display: grid;
+  place-items: center;
+  padding: 2rem 1rem;
+}
+
+.app-shell {
+  width: min(100%, 42rem);
+  background: var(--card-bg);
+  border-radius: 1.25rem;
+  padding: 2.5rem;
+  box-shadow: 0 24px 60px rgb(15 23 42 / 35%);
+}
+
+.app-header {
+  border-bottom: 1px solid var(--border);
+  padding-bottom: 1.5rem;
+}
+
+.eyebrow {
+  margin: 0 0 0.5rem;
+  font-size: 0.75rem;
+  font-weight: 700;
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+  color: var(--accent);
+}
+
+h1 {
+  margin: 0;
+  font-size: clamp(2rem, 5vw, 2.75rem);
+  line-height: 1.1;
+}
+
+.version {
+  margin: 0.75rem 0 0;
+  color: var(--muted);
+  font-size: 0.9rem;
+}
+
+.status-card {
+  margin-top: 1.75rem;
+  padding: 1.5rem;
+  border: 1px solid var(--border);
+  border-radius: 0.9rem;
+}
+
+.status-card h2 {
+  margin: 0 0 0.5rem;
+  font-size: 1.15rem;
+}
+
+.status-card p {
+  margin: 0.4rem 0 0;
+  line-height: 1.55;
+}
+
+.status-loading {
+  background: var(--pending-bg);
+  border-color: var(--pending-border);
+}
+
+.status-connected {
+  background: var(--ok-bg);
+  border-color: var(--ok-border);
+}
+
+.status-unavailable {
+  background: var(--warn-bg);
+  border-color: var(--warn-border);
+}
+
+.error-detail {
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 0.85rem;
+  color: #9a3412;
+}
+
+code {
+  background: rgb(15 23 42 / 7%);
+  border-radius: 0.3rem;
+  padding: 0.1rem 0.3rem;
+  font-size: 0.9em;
+}
+
+.app-footer {
+  display: flex;
+  justify-content: space-between;
+  gap: 1rem;
+  margin-top: 1.75rem;
+  padding-top: 1rem;
+  border-top: 1px solid var(--border);
+  color: var(--muted);
+  font-size: 0.8rem;
+}
+
+@media (max-width: 640px) {
+  .app-shell {
+    padding: 1.5rem;
+  }
+
+  .app-footer {
+    flex-direction: column;
+    gap: 0.25rem;
+  }
+}
