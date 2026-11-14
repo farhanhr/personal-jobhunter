@@ -13,6 +13,7 @@ from datetime import datetime
 from fastapi import FastAPI
 from sqlalchemy import Engine
 
+from personal_job_finder_api.api.errors import install_error_handlers
 from personal_job_finder_api.api.v1.router import api_router
 from personal_job_finder_api.core.config import Settings, settings
 from personal_job_finder_api.core.time import utc_now
@@ -57,6 +58,7 @@ def create_app(
         version=resolved_settings.version,
         lifespan=lifespan,
     )
+    install_error_handlers(app)
     app.state.settings = resolved_settings
     app.include_router(api_router, prefix=resolved_settings.api_v1_prefix)
     return app

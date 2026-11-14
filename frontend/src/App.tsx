@@ -1,5 +1,6 @@
 import { useEffect, useState } from 'react'
 import { fetchHealth, type HealthResponse } from './api/health'
+import { TargetRolesSettings } from './components/TargetRolesSettings'
 import './App.css'
 
 const APP_NAME = 'Personal Job Finder'
@@ -75,6 +76,8 @@ function App() {
           </>
         )}
       </section>
+
+      <TargetRolesSettings />
 
       <footer className="app-footer">
         <span>Loopback only</span>

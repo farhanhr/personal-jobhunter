@@ -4,7 +4,9 @@ from fastapi import APIRouter
 
 from personal_job_finder_api.api.v1.health import router as health_router
 from personal_job_finder_api.api.v1.search_policy import router as search_policy_router
+from personal_job_finder_api.api.v1.settings import router as settings_router
 
 api_router = APIRouter()
 api_router.include_router(health_router)
 api_router.include_router(search_policy_router)
+api_router.include_router(settings_router)

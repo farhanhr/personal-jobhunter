@@ -8,12 +8,32 @@ const healthyPayload = {
   version: '0.1.0',
 }
 
+const emptySettingsPayload = {
+  target_roles: [],
+  max_target_roles: 3,
+}
+
 function mockResponse(body: unknown, ok = true): Response {
   return {
     ok,
     status: ok ? 200 : 503,
     json: async () => body,
   } as Response
+}
+
+function mockApiFetch(healthResponse: Response = mockResponse(healthyPayload)) {
+  return vi.fn((input: RequestInfo | URL) => {
+    const url = String(input)
+
+    if (url === '/api/v1/health') {
+      return Promise.resolve(healthResponse)
+    }
+    if (url === '/api/v1/settings/search') {
+      return Promise.resolve(mockResponse(emptySettingsPayload))
+    }
+
+    return Promise.reject(new Error(`Unexpected fetch request: ${url}`))
+  })
 }
 
 describe('App', () => {
@@ -35,17 +55,20 @@ describe('App', () => {
   })
 
   it('shows the connected state when the backend is healthy', async () => {
-    vi.stubGlobal('fetch', vi.fn().mockResolvedValue(mockResponse(healthyPayload)))
+    vi.stubGlobal('fetch', mockApiFetch())
 
     render(<App />)
 
     expect(await screen.findByText(/backend connected/i)).toBeInTheDocument()
     expect(screen.getByText(/personal-job-finder-api/i)).toBeInTheDocument()
     expect(screen.getByText('Version 0.1.0')).toBeInTheDocument()
+    expect(
+      await screen.findByRole('heading', { name: /target roles/i }),
+    ).toBeInTheDocument()
   })
 
   it('requests the versioned health endpoint', async () => {
-    const fetchMock = vi.fn().mockResolvedValue(mockResponse(healthyPayload))
+    const fetchMock = mockApiFetch()
     vi.stubGlobal('fetch', fetchMock)
 
     render(<App />)
@@ -68,14 +91,11 @@ describe('App', () => {
     render(<App />)
 
     expect(await screen.findByText(/backend unavailable/i)).toBeInTheDocument()
-    expect(screen.getByText(/network down/i)).toBeInTheDocument()
+    expect(screen.getAllByText(/network down/i).length).toBeGreaterThan(0)
   })
 
   it('shows the unavailable state for a non-successful response', async () => {
-    vi.stubGlobal(
-      'fetch',
-      vi.fn().mockResolvedValue(mockResponse({}, false)),
-    )
+    vi.stubGlobal('fetch', mockApiFetch(mockResponse({}, false)))
 
     render(<App />)
 
@@ -84,10 +104,7 @@ describe('App', () => {
   })
 
   it('rejects a malformed health payload', async () => {
-    vi.stubGlobal(
-      'fetch',
-      vi.fn().mockResolvedValue(mockResponse({ status: 'ok' })),
-    )
+    vi.stubGlobal('fetch', mockApiFetch(mockResponse({ status: 'ok' })))
 
     render(<App />)
 
@@ -98,9 +115,7 @@ describe('App', () => {
   it('rejects a non-ok health status', async () => {
     vi.stubGlobal(
       'fetch',
-      vi.fn().mockResolvedValue(
-        mockResponse({ ...healthyPayload, status: 'degraded' }),
-      ),
+      mockApiFetch(mockResponse({ ...healthyPayload, status: 'degraded' })),
     )
 
     render(<App />)

@@ -29,6 +29,13 @@ class Settings:
     data_dir: Path = field(default_factory=default_data_dir)
     database_filename: str = "personal-job-finder.sqlite3"
     sqlite_busy_timeout_ms: int = 5_000
+    allowed_hosts: tuple[str, ...] = ("127.0.0.1", "localhost", "::1")
+    allowed_origins: tuple[str, ...] = (
+        "http://127.0.0.1:5173",
+        "http://localhost:5173",
+        "http://127.0.0.1:8000",
+        "http://localhost:8000",
+    )
 
     @property
     def database_path(self) -> Path:
