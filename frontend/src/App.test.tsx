@@ -1,4 +1,5 @@
-import { render, screen } from '@testing-library/react'
+import { render, screen, waitFor } from '@testing-library/react'
+import userEvent from '@testing-library/user-event'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import App from './App'
 
@@ -30,6 +31,13 @@ const blockedPolicyPayload = {
   blocking_reasons: ['no_usable_source'],
 }
 
+const eligiblePolicyPayload = {
+  ...blockedPolicyPayload,
+  can_start: true,
+  block_reason: null,
+  blocking_reasons: [],
+}
+
 function mockResponse(body: unknown, ok = true): Response {
   return {
     ok,
@@ -50,6 +58,9 @@ function mockApiFetch(healthResponse: Response = mockResponse(healthyPayload)) {
     }
     if (url === '/api/v1/search-policy') {
       return Promise.resolve(mockResponse(blockedPolicyPayload))
+    }
+    if (url === '/api/v1/companies') {
+      return Promise.resolve(mockResponse({ companies: [] }))
     }
 
     return Promise.reject(new Error(`Unexpected fetch request: ${url}`))
@@ -87,6 +98,9 @@ describe('App', () => {
     ).toBeInTheDocument()
     expect(
       await screen.findByRole('heading', { name: /manual search/i }),
+    ).toBeInTheDocument()
+    expect(
+      await screen.findByRole('heading', { name: /company sources/i }),
     ).toBeInTheDocument()
   })
 
@@ -145,5 +159,76 @@ describe('App', () => {
 
     expect(await screen.findByText(/backend unavailable/i)).toBeInTheDocument()
     expect(screen.getByText(/unexpected payload/i)).toBeInTheDocument()
+  })
+
+  it('re-checks search eligibility after a source is approved', async () => {
+    const user = userEvent.setup()
+    let policyCalls = 0
+    let approved = false
+    const fetchMock = vi.fn((input: RequestInfo | URL, init?: RequestInit) => {
+      const url = String(input)
+      const method = init?.method ?? 'GET'
+
+      if (url === '/api/v1/health') {
+        return Promise.resolve(mockResponse(healthyPayload))
+      }
+      if (url === '/api/v1/settings/search') {
+        return Promise.resolve(mockResponse(emptySettingsPayload))
+      }
+      if (url === '/api/v1/companies' && method === 'GET') {
+        return Promise.resolve(
+          mockResponse({
+            companies: [
+              {
+                company_id: 'company_1',
+                company_name: 'Example Company',
+                ats_type: 'greenhouse',
+                board_token: 'example-board',
+                enabled: true,
+                policy_status: approved ? 'permitted' : 'unreviewed',
+                can_fetch: approved,
+              },
+            ],
+          }),
+        )
+      }
+      if (url === '/api/v1/companies/company_1' && method === 'PATCH') {
+        approved = true
+        return Promise.resolve(
+          mockResponse({
+            company_id: 'company_1',
+            company_name: 'Example Company',
+            ats_type: 'greenhouse',
+            board_token: 'example-board',
+            enabled: true,
+            policy_status: 'permitted',
+            can_fetch: true,
+          }),
+        )
+      }
+      if (url === '/api/v1/search-policy') {
+        policyCalls += 1
+        return Promise.resolve(
+          mockResponse(approved ? eligiblePolicyPayload : blockedPolicyPayload),
+        )
+      }
+
+      return Promise.reject(new Error(`Unexpected fetch request: ${url} ${method}`))
+    })
+    vi.stubGlobal('fetch', fetchMock)
+
+    render(<App />)
+
+    const approveButton = await screen.findByRole('button', {
+      name: /approve source/i,
+    })
+    expect(policyCalls).toBe(1)
+
+    await user.click(approveButton)
+
+    await waitFor(() => expect(policyCalls).toBe(2))
+    expect(
+      await screen.findByRole('button', { name: /start search/i }),
+    ).toBeEnabled()
   })
 })

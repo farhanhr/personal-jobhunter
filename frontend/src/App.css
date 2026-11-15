@@ -323,6 +323,93 @@ button:focus-visible {
   line-height: 1.5;
 }
 
+.source-counters {
+  display: block;
+  color: var(--muted);
+  font-size: 0.85rem;
+}
+
+.company-list {
+  display: grid;
+  gap: 0.75rem;
+  margin: 1rem 0 0;
+  padding: 0;
+  list-style: none;
+}
+
+.company-card {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 1rem;
+  padding: 1rem;
+  border: 1px solid var(--border);
+  border-radius: 0.75rem;
+  background: #fff;
+}
+
+.company-card h3 {
+  margin: 0 0 0.25rem;
+  font-size: 1rem;
+}
+
+.company-card p {
+  margin: 0.2rem 0;
+}
+
+.company-status {
+  font-size: 0.85rem;
+  font-weight: 600;
+}
+
+.company-status-permitted {
+  color: #065f46;
+}
+
+.company-status-unreviewed {
+  color: #92400e;
+}
+
+.company-status-blocked {
+  color: #b91c1c;
+}
+
+.company-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.5rem;
+}
+
+.company-form-fields {
+  display: grid;
+  gap: 0.4rem;
+  margin-top: 0.75rem;
+}
+
+.company-form-fields label {
+  font-size: 0.85rem;
+  font-weight: 600;
+}
+
+.company-form-fields input {
+  width: 100%;
+  padding: 0.55rem 0.7rem;
+  border: 1px solid #cbd5e1;
+  border-radius: 0.5rem;
+  font: inherit;
+}
+
+.company-form-fields input:focus {
+  outline: 2px solid var(--accent);
+  outline-offset: 1px;
+}
+
+.settings-form h3 {
+  margin: 1.25rem 0 0;
+  font-size: 0.95rem;
+}
+
 .settings-success {
   margin: 1rem 0 0;
   padding: 0.75rem 1rem;

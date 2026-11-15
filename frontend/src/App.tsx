@@ -1,5 +1,6 @@
 import { useEffect, useState } from 'react'
 import { fetchHealth, type HealthResponse } from './api/health'
+import { CompanySources } from './components/CompanySources'
 import { SearchRunPanel } from './components/SearchRunPanel'
 import { TargetRolesSettings } from './components/TargetRolesSettings'
 import './App.css'
@@ -16,6 +17,9 @@ function App() {
   const [connection, setConnection] = useState<ConnectionState>({
     status: 'loading',
   })
+  // Bumped when source policy changes so the search panel re-evaluates
+  // eligibility against the backend instead of showing stale blockers.
+  const [policyVersion, setPolicyVersion] = useState(0)
 
   useEffect(() => {
     const controller = new AbortController()
@@ -78,7 +82,11 @@ function App() {
         )}
       </section>
 
-      <SearchRunPanel />
+      <SearchRunPanel refreshToken={policyVersion} />
+
+      <CompanySources
+        onSourcePolicyChanged={() => setPolicyVersion((version) => version + 1)}
+      />
 
       <TargetRolesSettings />
 
