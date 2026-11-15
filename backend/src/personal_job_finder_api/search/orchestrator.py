@@ -19,6 +19,7 @@ from sqlalchemy import Engine
 
 from personal_job_finder_api.core.time import ensure_aware_utc, utc_now
 from personal_job_finder_api.db.engine import immediate_transaction
+from personal_job_finder_api.domain.run_lifecycle import resolve_completion_status
 from personal_job_finder_api.domain.search_policy import RunStatus
 from personal_job_finder_api.repositories.search_policy import (
     PersistedSearchRun,
@@ -123,23 +124,22 @@ class SearchOrchestrator:
         succeeded = [result for result in results if result.status is SourceRunStatus.COMPLETED]
         failed_count = len(results) - len(succeeded)
 
-        if failed_count == len(results):
-            status = RunStatus.FAILED
+        # Pending synchronization outranks source warnings. Otherwise a mixed
+        # success/failure run could claim completion while the successful source's
+        # records still exist only in local SQLite.
+        status = resolve_completion_status(
+            pending_sync_count=staging_summary.pending_sync_count,
+            failed_sources=failed_count,
+            total_sources=len(results),
+        )
+        if status is RunStatus.FAILED:
             error_summary: str | None = ALL_SOURCES_FAILED_SUMMARY
         elif failed_count:
-            status = RunStatus.COMPLETED_WITH_WARNINGS
             error_summary = (
                 f"{failed_count} of {len(results)} configured sources failed; "
                 "review the source summary."
             )
-        elif staging_summary.outbox_enqueued > 0:
-            # Google Sheets transport is not implemented yet, so staged records
-            # are durable but not canonical. Report that honestly rather than
-            # claiming a completed sync.
-            status = RunStatus.COMPLETED_PENDING_SYNC
-            error_summary = None
         else:
-            status = RunStatus.COMPLETED
             error_summary = None
 
         return self._finish(
@@ -196,7 +196,8 @@ class SearchOrchestrator:
                     "records_new": staging_summary.records_new,
                     "records_updated": staging_summary.records_updated,
                     "records_unchanged": staging_summary.records_unchanged,
-                    "pending_sync": staging_summary.outbox_enqueued,
+                    "pending_sync": staging_summary.pending_sync_count,
+                    "outbox_enqueued": staging_summary.outbox_enqueued,
                 }
             )
         summaries: list[dict[str, Any]] = [result.to_summary() for result in results]

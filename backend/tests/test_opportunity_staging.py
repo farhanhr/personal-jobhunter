@@ -466,3 +466,39 @@ def test_staging_reports_the_run_association(engine: Engine) -> None:
     assert summary.feed_review == 0
     assert summary.feed_excluded == 0
     assert summary.outbox_enqueued == 1
+    assert summary.pending_sync_count == 1
+
+
+def test_pending_sync_count_drops_once_the_projection_is_synced(engine: Engine) -> None:
+    service(engine).stage(run_id="run_1", records=[record()])
+    with engine.begin() as connection:
+        connection.execute(sync_outbox.update().values(status="synced"))
+
+    summary = service(engine).stage(run_id="run_2", records=[record()])
+
+    assert summary.outbox_enqueued == 0
+    assert summary.pending_sync_count == 0
+
+
+def test_record_that_becomes_local_only_withdraws_unsent_projection(engine: Engine) -> None:
+    service(engine).stage(run_id="run_1", records=[record()])
+    assert count(engine, sync_outbox) == 1
+
+    summary = service(engine).stage(
+        run_id="run_2",
+        records=[record(location="Singapore")],
+    )
+
+    assert summary.feed_excluded == 1
+    assert summary.pending_sync_count == 0
+    assert count(engine, sync_outbox) == 0
+
+
+def test_withdrawn_projection_does_not_delete_already_synced_rows(engine: Engine) -> None:
+    service(engine).stage(run_id="run_1", records=[record()])
+    with engine.begin() as connection:
+        connection.execute(sync_outbox.update().values(status="synced"))
+
+    service(engine).stage(run_id="run_2", records=[record(location="Singapore")])
+
+    assert count(engine, sync_outbox) == 1

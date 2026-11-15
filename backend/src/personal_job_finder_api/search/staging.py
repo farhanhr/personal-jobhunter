@@ -62,6 +62,7 @@ class StagingSummary:
     records_updated: int
     records_unchanged: int
     outbox_enqueued: int
+    pending_sync_count: int
     feed_main: int
     feed_review: int
     feed_excluded: int
@@ -144,7 +145,12 @@ class OpportunityStagingService:
                 if bucket == FEED_EXCLUDED:
                     # Excluded records stay staged for audit, but they must not be
                     # written into the user-facing Opportunities sheet. They are
-                    # therefore local-only by design.
+                    # therefore local-only by design, so any unsent projection
+                    # queued by an earlier run is withdrawn here.
+                    self._repository.discard_unsent_outbox(
+                        connection,
+                        entity_id=staged.opportunity_id,
+                    )
                     continue
 
                 payload_json = _payload_json(
@@ -165,6 +171,11 @@ class OpportunityStagingService:
                 if queued:
                     counters["outbox"] += 1
 
+            pending_sync_count = self._repository.count_unsynced_for_run(
+                connection,
+                run_id,
+            )
+
         return StagingSummary(
             run_id=run_id,
             records_received=len(records),
@@ -172,6 +183,7 @@ class OpportunityStagingService:
             records_updated=counters["updated"],
             records_unchanged=counters["unchanged"],
             outbox_enqueued=counters["outbox"],
+            pending_sync_count=pending_sync_count,
             feed_main=counters[FEED_MAIN],
             feed_review=counters[FEED_REVIEW],
             feed_excluded=counters[FEED_EXCLUDED],

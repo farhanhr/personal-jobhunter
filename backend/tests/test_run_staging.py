@@ -83,6 +83,18 @@ class FakeConnector:
         )
 
 
+class FailingConnector:
+    source_id = "company_other"
+
+    def run(self) -> SourceRunResult:
+        return SourceRunResult(
+            source_id=self.source_id,
+            status=SourceRunStatus.FAILED,
+            records_found=0,
+            error_code="http_503",
+        )
+
+
 def accept_run(
     engine: Engine,
     clock,
@@ -301,3 +313,85 @@ def test_second_run_does_not_duplicate_staged_records(
     assert count(engine, opportunities) == 1
     assert count(engine, sync_outbox) == 1
     assert run_row(engine, second_run.run.run_id)["status"] == "completed_pending_sync"
+
+
+def test_mixed_source_failure_with_pending_sync_reports_pending_sync(
+    engine: Engine,
+    seed_config,
+    clock_factory,
+) -> None:
+    """A successful source's unsynced records outrank another source's failure."""
+
+    seed_config()
+    clock = clock_factory(wib(2026, 11, 15, 7, 0))
+    run_id = accept_run(engine, clock)
+
+    result = SearchOrchestrator(
+        engine,
+        connector_factory=lambda _snapshot: [
+            FakeConnector((make_record(external_id="1"),)),
+            FailingConnector(),
+        ],
+        clock=clock,
+    ).run(run_id)
+
+    row = run_row(engine, run_id)
+    assert result is RunStatus.COMPLETED_PENDING_SYNC
+    assert row["status"] == "completed_pending_sync"
+    assert count(engine, sync_outbox) == 1
+    assert "1 of 2 configured sources failed" in (row["error_summary"] or "")
+    progress = json.loads(row["progress_json"])
+    assert progress["pending_sync"] == 1
+    summaries = json.loads(row["source_summary_json"])
+    assert [summary["status"] for summary in summaries] == ["completed", "failed"]
+    assert summaries[1]["error_code"] == "http_503"
+
+
+def test_excluded_only_records_allow_completion_without_sheets_sync(
+    engine: Engine,
+    seed_config,
+    clock_factory,
+) -> None:
+    seed_config()
+    clock = clock_factory(wib(2026, 11, 15, 7, 0))
+    run_id = accept_run(engine, clock)
+
+    result = SearchOrchestrator(
+        engine,
+        connector_factory=lambda _snapshot: [
+            FakeConnector((make_record(external_id="1", location="Singapore"),)),
+        ],
+        clock=clock,
+    ).run(run_id)
+
+    row = run_row(engine, run_id)
+    assert result is RunStatus.COMPLETED
+    assert count(engine, opportunities) == 1
+    assert count(engine, sync_outbox) == 0
+    assert json.loads(row["progress_json"])["pending_sync"] == 0
+
+
+def test_excluded_only_records_with_a_failed_source_report_warnings(
+    engine: Engine,
+    seed_config,
+    clock_factory,
+) -> None:
+    seed_config()
+    clock = clock_factory(wib(2026, 11, 15, 7, 0))
+    run_id = accept_run(engine, clock)
+
+    result = SearchOrchestrator(
+        engine,
+        connector_factory=lambda _snapshot: [
+            FakeConnector((make_record(external_id="1", location="Singapore"),)),
+            FailingConnector(),
+        ],
+        clock=clock,
+    ).run(run_id)
+
+    row = run_row(engine, run_id)
+    assert result is RunStatus.COMPLETED_WITH_WARNINGS
+    assert row["status"] == "completed_with_warnings"
+    assert count(engine, sync_outbox) == 0
+    assert json.loads(row["progress_json"])["pending_sync"] == 0
+    assert "1 of 2 configured sources failed" in (row["error_summary"] or "")

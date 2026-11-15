@@ -5,7 +5,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Any
 
-from sqlalchemy import select, update
+from sqlalchemy import distinct, func, select, update
 from sqlalchemy.engine import Connection
 
 from personal_job_finder_api.db.tables import (
@@ -328,7 +328,14 @@ class OpportunityStagingRepository:
 
         A row that is ``in_progress`` is being written by a sync worker. When the
         content changes underneath it, the worker must compare ``payload_hash``
-        before marking the row ``synced``; that check belongs to the M4B writer.
+        before marking the row ``synced``. The M4B dispatcher must therefore use a
+        fenced update:
+
+        ``UPDATE sync_outbox SET status='synced', synced_at_utc=:t
+        WHERE outbox_id=:id AND payload_hash=:sent_hash AND status='in_progress'``
+
+        A zero row count means the payload was superseded, so the newer version
+        must stay pending instead of being marked as synchronized.
         """
 
         existing = self.find_outbox(
@@ -383,6 +390,56 @@ class OpportunityStagingRepository:
             )
         )
         return True
+
+    def discard_unsent_outbox(
+        self,
+        connection: Connection,
+        *,
+        entity_id: str,
+        destination: str = OUTBOX_DESTINATION,
+        entity_type: str = OUTBOX_ENTITY_TYPE,
+    ) -> int:
+        """Withdraw queued work for a record that became local-only.
+
+        Only rows that have not started sending are removed. A row already
+        ``in_progress`` or ``synced`` is left alone; retracting a written row is
+        the sync worker's responsibility.
+        """
+
+        result = connection.execute(
+            sync_outbox.delete().where(
+                sync_outbox.c.destination == destination,
+                sync_outbox.c.entity_type == entity_type,
+                sync_outbox.c.entity_id == entity_id,
+                sync_outbox.c.status.in_(("pending", "retry_wait", "blocked")),
+            )
+        )
+        return int(result.rowcount or 0)
+
+    def count_unsynced_for_run(self, connection: Connection, run_id: str) -> int:
+        """Count distinct projections still awaiting canonical synchronization.
+
+        The count is scoped to opportunities observed by this run, so pending work
+        from unrelated runs cannot keep this run permanently pending. Excluded
+        local-only records have no outbox row and therefore do not count.
+        """
+
+        statement = (
+            select(func.count(distinct(sync_outbox.c.outbox_id)))
+            .select_from(
+                sync_outbox.join(
+                    opportunity_run_refs,
+                    sync_outbox.c.entity_id == opportunity_run_refs.c.opportunity_id,
+                )
+            )
+            .where(
+                opportunity_run_refs.c.run_id == run_id,
+                sync_outbox.c.destination == OUTBOX_DESTINATION,
+                sync_outbox.c.entity_type == OUTBOX_ENTITY_TYPE,
+                sync_outbox.c.status != "synced",
+            )
+        )
+        return int(connection.execute(statement).scalar_one())
 
     def list_outbox(
         self,
