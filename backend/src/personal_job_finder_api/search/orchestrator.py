@@ -9,6 +9,7 @@ run after a process restart.
 from __future__ import annotations
 
 import json
+import logging
 from collections.abc import Callable, Sequence
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime
@@ -30,12 +31,21 @@ from personal_job_finder_api.search.connectors import (
     SourceRunStatus,
     connector_snapshot,
 )
+from personal_job_finder_api.search.staging import (
+    OpportunityStagingService,
+    StagingSummary,
+)
+
+logger = logging.getLogger(__name__)
 
 MAX_CONCURRENT_SOURCE_REQUESTS = 2
 NO_CONNECTOR_SUMMARY = "No connector implementation is available for the configured sources."
 ALL_SOURCES_FAILED_SUMMARY = "All configured sources failed; the accepted run remains consumed."
 CONNECTOR_INIT_FAILED_SUMMARY = (
     "Connector initialization failed; the accepted run remains consumed."
+)
+STAGING_FAILED_SUMMARY = (
+    "Search results could not be stored durably; the accepted run remains consumed."
 )
 
 
@@ -48,11 +58,13 @@ class SearchOrchestrator:
         *,
         connector_factory: ConnectorFactory,
         clock: Callable[[], datetime] = utc_now,
+        staging: OpportunityStagingService | None = None,
     ) -> None:
         self._engine = engine
         self._connector_factory = connector_factory
         self._clock = clock
         self._repository = SearchPolicyRepository()
+        self._staging = staging or OpportunityStagingService(engine, clock=clock)
 
     def run(self, run_id: str) -> RunStatus | None:
         """Execute an accepted run once; return its terminal status or None.
@@ -87,6 +99,27 @@ class SearchOrchestrator:
             )
 
         results = self._execute(connectors)
+
+        # Records must be durable before the run can report success, so staging
+        # happens before the terminal transition and outside the run transaction.
+        try:
+            staging_summary = self._staging.stage(
+                run_id=run.run_id,
+                records=[record for result in results for record in result.records],
+            )
+        except Exception:
+            logger.warning(
+                "Search run %s could not stage its records; marking it failed.",
+                run.run_id,
+            )
+            return self._finish(
+                run.run_id,
+                status=RunStatus.FAILED,
+                results=results,
+                stage="failed",
+                error_summary=STAGING_FAILED_SUMMARY,
+            )
+
         succeeded = [result for result in results if result.status is SourceRunStatus.COMPLETED]
         failed_count = len(results) - len(succeeded)
 
@@ -99,6 +132,12 @@ class SearchOrchestrator:
                 f"{failed_count} of {len(results)} configured sources failed; "
                 "review the source summary."
             )
+        elif staging_summary.outbox_enqueued > 0:
+            # Google Sheets transport is not implemented yet, so staged records
+            # are durable but not canonical. Report that honestly rather than
+            # claiming a completed sync.
+            status = RunStatus.COMPLETED_PENDING_SYNC
+            error_summary = None
         else:
             status = RunStatus.COMPLETED
             error_summary = None
@@ -109,6 +148,7 @@ class SearchOrchestrator:
             results=results,
             stage="completed",
             error_summary=error_summary,
+            staging_summary=staging_summary,
         )
 
     def _claim(self, run_id: str) -> PersistedSearchRun | None:
@@ -140,14 +180,25 @@ class SearchOrchestrator:
         results: list[SourceRunResult],
         stage: str,
         error_summary: str | None,
+        staging_summary: StagingSummary | None = None,
     ) -> RunStatus:
-        progress = {
+        progress: dict[str, Any] = {
             "stage": stage,
             "completed_sources": sum(
                 1 for result in results if result.status is SourceRunStatus.COMPLETED
             ),
             "total_sources": len(results),
         }
+        if staging_summary is not None:
+            progress.update(
+                {
+                    "records_staged": staging_summary.records_received,
+                    "records_new": staging_summary.records_new,
+                    "records_updated": staging_summary.records_updated,
+                    "records_unchanged": staging_summary.records_unchanged,
+                    "pending_sync": staging_summary.outbox_enqueued,
+                }
+            )
         summaries: list[dict[str, Any]] = [result.to_summary() for result in results]
         finished_at = ensure_aware_utc(self._clock(), "clock")
 

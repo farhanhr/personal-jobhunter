@@ -215,8 +215,8 @@ def test_permitted_company_produces_a_completed_run_with_source_counters(
     ).run(run_id)
 
     row = run_row(engine, run_id)
-    assert result is RunStatus.COMPLETED
-    assert row["status"] == "completed"
+    assert result is RunStatus.COMPLETED_PENDING_SYNC
+    assert row["status"] == "completed_pending_sync"
     assert transport.urls == [
         "https://boards-api.greenhouse.io/v1/boards/acme-example/jobs?content=true"
     ]
@@ -318,7 +318,7 @@ def test_orchestrator_uses_the_production_factory_end_to_end(
     ).run(run_id)
 
     summary = json.loads(run_row(engine, run_id)["source_summary_json"])[0]
-    assert result is RunStatus.COMPLETED
+    assert result is RunStatus.COMPLETED_PENDING_SYNC
     assert transport.urls == [
         "https://boards-api.greenhouse.io/v1/boards/acme-example/jobs?content=true"
     ]

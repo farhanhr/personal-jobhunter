@@ -28,8 +28,9 @@ class SourceRunStatus(StrEnum):
 class SourceRunResult:
     """Normalized, persistence-safe summary of one connector execution.
 
-    ``records`` keeps the normalized opportunities in memory for the current run.
-    Only the counters and the error code are persisted in the run summary.
+    ``records`` keeps the normalized opportunities available for the current run.
+    The orchestrator stages them durably before the run reports success; only the
+    counters and the error code are persisted in the run summary.
     """
 
     source_id: str

@@ -317,11 +317,10 @@ def test_start_accepts_run_and_status_reaches_completed(
     status_payload = status_response.json()
     assert status_payload["run_id"] == accepted["run_id"]
     assert status_payload["status"] == "completed"
-    assert status_payload["progress"] == {
-        "stage": "completed",
-        "completed_sources": 1,
-        "total_sources": 1,
-    }
+    progress = status_payload["progress"]
+    assert progress["stage"] == "completed"
+    assert progress["completed_sources"] == 1
+    assert progress["total_sources"] == 1
     assert status_payload["source_results"] == [
         {
             "source_id": "company_1",

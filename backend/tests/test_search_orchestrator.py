@@ -110,11 +110,12 @@ def test_successful_connector_completes_run_and_persists_safe_summary(
     assert row["started_at_utc"] is not None
     assert row["finished_at_utc"] is not None
     assert row["error_summary"] is None
-    assert json.loads(row["progress_json"]) == {
-        "stage": "completed",
-        "completed_sources": 1,
-        "total_sources": 1,
-    }
+    progress = json.loads(row["progress_json"])
+    assert progress["stage"] == "completed"
+    assert progress["completed_sources"] == 1
+    assert progress["total_sources"] == 1
+    assert progress["records_staged"] == 0
+    assert progress["pending_sync"] == 0
     assert json.loads(row["source_summary_json"]) == [
         {
             "source_id": "source_1",
@@ -222,11 +223,10 @@ def test_partial_source_failure_marks_completed_with_warnings(
     row = _row(engine, run_id)
     assert result is RunStatus.COMPLETED_WITH_WARNINGS
     assert row["status"] == "completed_with_warnings"
-    assert json.loads(row["progress_json"]) == {
-        "stage": "completed",
-        "completed_sources": 1,
-        "total_sources": 2,
-    }
+    progress = json.loads(row["progress_json"])
+    assert progress["stage"] == "completed"
+    assert progress["completed_sources"] == 1
+    assert progress["total_sources"] == 2
 
 
 def test_connector_factory_only_receives_usable_permitted_sources(
