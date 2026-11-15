@@ -90,15 +90,19 @@ playwright/.auth/
 browser-profile/
 user-data-dir/
 
-# Local AI / agent runtime state (don't change, working only)
+# Local AI / agent development material (local-only; never publish)
 /docs/
-.opencode/cache/
-.opencode/logs/
-.agent-runtime/
-.opencode/
+/AGENTS.md
+/CLAUDE.md
+/GEMINI.md
 /.agents/
-scripts/
-opencode.jsonc
-patches/
-PUBLICATION_GATES.md
-APPLY_PATCH.md
+/.opencode/
+/.claude/
+/.codex/
+/.agent-runtime/
+/opencode.jsonc
+/skills-lock.json
+/scripts/
+/patches/
+/PUBLICATION_GATES.md
+/APPLY_PATCH.md
