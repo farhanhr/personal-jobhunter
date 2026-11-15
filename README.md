@@ -5,11 +5,7 @@ It helps one person find relevant opportunities from curated official company so
 and user-provided LinkedIn hiring posts. It does **not** apply for jobs, message
 recruiters, or automate LinkedIn.
 
-**Current status:** M1 — search policy engine. The backend enforces the Jakarta
-operational day, 12-hour cooldown, two-run daily quota, active-run lock, and idempotent
-atomic reservation in local SQLite. The React dashboard still shows the M0 shell. Job
-connectors, Auto Search orchestration, Google Sheets, LinkedIn import, and AI features
-belong to later milestones.
+**Current status:** In development
 
 ## Product boundaries
 
