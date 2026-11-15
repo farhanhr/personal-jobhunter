@@ -5,9 +5,9 @@ It helps one person find relevant opportunities from curated official company so
 and user-provided LinkedIn hiring posts. It does **not** apply for jobs, message
 recruiters, or automate LinkedIn.
 
-**Current status:** Core search, durable opportunity staging, and local read APIs are
-implemented. Google Sheets synchronization and a dedicated job-feed screen are still
-pending.
+**Current status:** Core search, durable opportunity staging, local read APIs, and the
+Google Sheets authentication/preflight foundation are implemented. The outbox
+dispatcher and a dedicated job-feed screen are still pending.
 
 ## Product boundaries
 
@@ -20,8 +20,8 @@ pending.
 - Maximum two accepted runs per operational day; 12-hour cooldown; 06:00
   `Asia/Jakarta` reset; one active run.
 - Google Sheets is the intended canonical user-facing record store; SQLite owns
-  operational state, durable staging, and pending sync work. Sheets synchronization is
-  not implemented yet.
+  operational state, durable staging, and pending sync work. Authentication and
+  spreadsheet preflight exist, but outbox synchronization is not implemented yet.
 - No background scheduler, auto-apply, recruiter messaging, or LinkedIn browser
   automation.
 
@@ -46,10 +46,14 @@ pending.
 - **Job feed and review API** — serves a paginated main feed and review queue at
   `GET /api/v1/jobs`, with stable opportunity identity, source provenance, safe external
   links, and run association.
+- **Google Sheets foundation** — desktop OAuth with the Sheets-only scope, keyring-first
+  credential storage with a private-file fallback, a bounded official Sheets API v4
+  adapter, and read-only spreadsheet preflight with explicit safe initialization.
 
-The Google Sheets transport and sync worker are **not implemented yet**; staged records
-currently remain local until that work is completed. A dedicated job-feed screen in the
-dashboard is also not implemented yet.
+The outbox dispatcher, `Job_Sources` projection, manual Sync action, and automatic
+synchronization are **not implemented yet**; staged records currently remain local until
+that work is completed. A dedicated job-feed screen in the dashboard is also not
+implemented yet.
 
 ## API surface
 
@@ -143,7 +147,7 @@ Starting a run requires an explicit user action and a unique idempotency key:
 ```bash
 curl -X POST http://127.0.0.1:8000/api/v1/search-runs \
   -H 'Content-Type: application/json' \
-  -H 'Idempotency-Key: local-demo-001' \
+  -H 'Idempotency-Key: 11111111-1111-4111-8111-111111111111' \
   -d '{}'
 ```
 
@@ -169,6 +173,86 @@ cd backend
 uv run alembic upgrade head
 uv run alembic current
 ```
+
+## Google Sheets setup
+
+The repository does not contain Google OAuth client credentials or user tokens. The
+foundation is optional until the sync dispatcher lands, but these steps prepare the
+local connection.
+
+1. In Google Cloud Console, enable the **Google Sheets API**.
+2. Configure an OAuth consent screen. For personal use, **External** with publishing
+   status **Testing** is sufficient while you are the only test user.
+3. Create an OAuth client of type **Desktop app**, then download its JSON file.
+4. Store the JSON outside Git, for example:
+
+   ```text
+   ~/.local/share/personal-job-finder/credentials/google-oauth-client.json
+   ```
+
+   Override the location with `GOOGLE_OAUTH_CLIENT_FILE`.
+5. Create or choose a spreadsheet and set its ID from the spreadsheet URL:
+
+   ```bash
+   export GOOGLE_SHEETS_SPREADSHEET_ID='<spreadsheet-id>'
+   ```
+
+6. From `backend/`, authorize the account through your system browser:
+
+   ```bash
+   uv run python -m personal_job_finder_api.integrations.google_sheets.cli auth
+   ```
+
+   The browser returns through an ephemeral loopback callback on `127.0.0.1`. Only the
+   `https://www.googleapis.com/auth/spreadsheets` scope is requested.
+
+7. Run the read-only preflight:
+
+   ```bash
+   uv run python -m personal_job_finder_api.integrations.google_sheets.cli check
+   ```
+
+8. If preflight reports missing tabs or empty header rows, explicitly initialize them:
+
+   ```bash
+   uv run python -m personal_job_finder_api.integrations.google_sheets.cli init
+   ```
+
+   Initialization only creates missing tabs and empty header rows. It refuses to
+   overwrite a non-empty header that does not match the accepted schema.
+
+Credentials are stored in the OS keyring through `keyring`. If no keyring backend is
+available, the application falls back to a private file at
+`~/.local/share/personal-job-finder/credentials/google-token.json` with mode `0600`
+and a `0700` directory. Tokens are never written to SQLite, outbox payloads, logs, or
+the repository.
+
+To disconnect the account and remove the stored credential:
+
+```bash
+cd backend
+uv run python -m personal_job_finder_api.integrations.google_sheets.cli disconnect
+```
+
+Revoking access from the Google account page also works; the next command then reports
+`reconnect_required` and the unusable credential is discarded automatically.
+
+External OAuth applications in **Testing** status can receive refresh tokens that expire
+after seven days. A weekly reconnect may therefore be necessary until the app is
+published or exempted; this is expected Google behavior, not a Sheets integration bug.
+
+| Variable | Default | Purpose |
+|---|---|---|
+| `GOOGLE_SHEETS_SPREADSHEET_ID` | unset | Spreadsheet used by the sync foundation |
+| `GOOGLE_OAUTH_CLIENT_FILE` | `<data-dir>/credentials/google-oauth-client.json` | Desktop OAuth client JSON |
+| `GOOGLE_TOKEN_FILE` | `<data-dir>/credentials/google-token.json` | Keyring fallback token file |
+| `GOOGLE_SHEETS_TIMEOUT_SECONDS` | `10` | Bounded Sheets request timeout |
+| `GOOGLE_SHEETS_MAX_BATCH_RANGES` | `100` | Maximum ranges per value batch |
+| `GOOGLE_OAUTH_TIMEOUT_SECONDS` | `300` | Loopback callback wait |
+| `GOOGLE_KEYRING_SERVICE_NAME` | `personal-job-finder` | Keyring service label |
+
+All values are local configuration. Never commit the client JSON, token file, or
+spreadsheet ID.
 
 ## Frontend — install and run
 
@@ -210,6 +294,13 @@ npm run typecheck
 npm run build
 npm run lint
 ```
+
+## Continuous integration
+
+`.github/workflows/verify.yml` runs on pushes to `main` and pull requests targeting
+`main`. One Ubuntu job installs Python 3.12 with uv and Node.js 22 with npm, then runs
+backend pytest, Ruff check/format, and the frontend tests, typecheck, lint, and
+production build. The workflow uses no repository secrets and performs no deployment.
 
 ## License
 
