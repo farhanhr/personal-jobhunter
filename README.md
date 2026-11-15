@@ -1,4 +1,4 @@
-# Personal Job Finder
+# Personal Job Hunter
 
 A single-user, local-first job discovery and organization application for Indonesia.
 It helps one person find relevant opportunities from curated official company sources
