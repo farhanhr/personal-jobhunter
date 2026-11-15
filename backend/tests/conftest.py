@@ -1,8 +1,9 @@
-"""Shared test fixtures for M1 persistence and policy tests."""
+"""Shared test fixtures for persistence, policy, and connector tests."""
 
 from __future__ import annotations
 
 import json
+import socket
 from collections.abc import Callable, Iterator
 from datetime import UTC, datetime
 from typing import Any
@@ -14,6 +15,24 @@ from personal_job_finder_api.core.time import format_utc
 from personal_job_finder_api.db.engine import create_engine_for_url
 from personal_job_finder_api.db.migrate import run_migrations
 from personal_job_finder_api.db.tables import companies, target_roles
+
+
+@pytest.fixture(autouse=True)
+def block_external_network(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Fail loudly if a test tries to open a real network connection.
+
+    FastAPI's ``TestClient`` runs the app in-process over ASGI, so it does not
+    need sockets. Connectors must always receive an injected fake transport.
+    """
+
+    def _blocked(*_args: object, **_kwargs: object) -> None:
+        raise AssertionError(
+            "Tests must not open external network connections; inject a fake transport instead."
+        )
+
+    monkeypatch.setattr(socket.socket, "connect", _blocked)
+    monkeypatch.setattr(socket.socket, "connect_ex", _blocked)
+    monkeypatch.setattr(socket, "create_connection", _blocked)
 
 
 @pytest.fixture

@@ -177,6 +177,10 @@ def _execute_connector(connector: SourceConnector) -> SourceRunResult:
             status=SourceRunStatus(result.status),
             records_found=max(0, int(result.records_found)),
             error_code=result.error_code,
+            records_relevant=result.records_relevant,
+            records_filtered=result.records_filtered,
+            records_invalid=result.records_invalid,
+            records=tuple(result.records),
         )
     except Exception:
         return SourceRunResult(
