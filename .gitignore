@@ -90,7 +90,7 @@ playwright/.auth/
 browser-profile/
 user-data-dir/
 
-# Local AI / agent development material (local-only; never publish)
+# Local AI / agent development material (local-only)
 /docs/
 /AGENTS.md
 /CLAUDE.md
