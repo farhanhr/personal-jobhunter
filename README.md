@@ -22,9 +22,6 @@ recruiters, or automate LinkedIn.
 - No background scheduler, auto-apply, recruiter messaging, or LinkedIn browser
   automation.
 
-The accepted architecture is documented in `AGENTS.md`, `docs/p0/01`–`14`, and
-`docs/adr/`.
-
 ## Stack
 
 | Layer | Technology |
@@ -33,17 +30,6 @@ The accepted architecture is documented in `AGENTS.md`, `docs/p0/01`–`14`, and
 | Frontend | React, TypeScript, Vite, npm, Vitest, Testing Library |
 | Network | Loopback only (`127.0.0.1`) |
 
-## Repository layout
-
-```text
-backend/                     FastAPI application and tests
-frontend/                    React + TypeScript + Vite application
-docs/p0/                     Original P0 baseline and P0.1 reconciliation
-docs/adr/                    Accepted architecture decision records
-docs/implementation/         Milestone implementation notes
-.agents/skills/              12 project Agent Skills
-.opencode/agents/            Read-only project subagents
-```
 
 ## Prerequisites
 
@@ -154,24 +140,6 @@ npm run typecheck
 npm run build
 npm run lint
 ```
-
-## Configuration and secrets
-
-- `.env.example` documents future settings. M1 does not auto-load `.env`; it reads
-  process environment variables only. Export `PJF_DATA_DIR` in your shell to override
-  the local database directory. Google credentials are not loaded yet.
-- Never commit OAuth credentials, tokens, spreadsheet IDs, SQLite files, exports, CVs,
-  recruiter contacts, or personal search settings.
-- See `docs/PUBLIC_REPOSITORY_POLICY.md` and `PUBLICATION_GATES.md`.
-
-## Documentation
-
-- `docs/IMPLEMENTATION_BEHAVIOR_SPEC.md` — observable product behavior.
-- `docs/p0/11`–`14` — accepted P0.1 reconciliation, data/sync contract, API addendum,
-  and decision register.
-- `docs/implementation/M0-project-foundation.md` — M0 foundation.
-- `docs/implementation/M1-search-policy-engine.md` — M1 policy, schema, reservation,
-  idempotency, recovery, and testing.
 
 ## License
 
