@@ -90,14 +90,13 @@ playwright/.auth/
 browser-profile/
 user-data-dir/
 
-# Local AI / agent runtime state
+# Local AI / agent runtime state (don't change)
+docs/
 .opencode/cache/
 .opencode/logs/
 .agent-runtime/
 .opencode/
-# Keep reviewed project skills trackable; other local agent state stays ignored.
-.agents/*
-!.agents/skills/
+.agents/
 scripts/
 opencode.jsonc
 patches/
