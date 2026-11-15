@@ -28,6 +28,8 @@ type RunState =
 type SearchRunPanelProps = {
   pollIntervalMs?: number
   maxPollAttempts?: number
+  /** Change this value to re-fetch search eligibility from the backend. */
+  refreshToken?: number
 }
 
 const DEFAULT_POLL_INTERVAL_MS = 1_000
@@ -55,7 +57,7 @@ const BLOCKER_LABELS: Record<string, string> = {
   no_target_roles: 'Add at least one primary target role.',
   too_many_target_roles: 'Keep at most three primary target roles.',
   no_usable_source:
-    'No usable source is configured. This build does not include a production connector yet.',
+    'No approved source is available. Register a company source and approve it before starting a search.',
   active_run_exists: 'Another search run is already active.',
   quota_exhausted: 'The two-run daily quota is exhausted.',
   cooldown_active: 'The 12-hour cooldown is still active.',
@@ -80,6 +82,7 @@ function formatInstant(value: string): string {
 export function SearchRunPanel({
   pollIntervalMs = DEFAULT_POLL_INTERVAL_MS,
   maxPollAttempts = DEFAULT_MAX_POLL_ATTEMPTS,
+  refreshToken = 0,
 }: SearchRunPanelProps = {}) {
   const [policyState, setPolicyState] = useState<PolicyState>({
     status: 'loading',
@@ -112,7 +115,7 @@ export function SearchRunPanel({
       cancelled = true
       controller.abort()
     }
-  }, [policyVersion])
+  }, [policyVersion, refreshToken])
 
   useEffect(() => {
     return () => {
@@ -422,11 +425,29 @@ function RunStatusCard({
 }
 
 function SourceResultItem({ result }: { result: SourceRunResult }) {
+  const hasCounters =
+    result.records_relevant !== undefined ||
+    result.records_filtered !== undefined ||
+    result.records_invalid !== undefined
+
   return (
     <li>
       <strong>{result.source_id}</strong>: {result.status},{' '}
       {result.records_found} record{result.records_found === 1 ? '' : 's'} found
       {result.error_code ? ` (${result.error_code})` : ''}.
+      {hasCounters && (
+        <span className="source-counters">
+          {result.records_relevant !== undefined && (
+            <> {result.records_relevant} matched your target roles.</>
+          )}
+          {result.records_filtered !== undefined && (
+            <> {result.records_filtered} filtered out by role or location.</>
+          )}
+          {result.records_invalid !== undefined && result.records_invalid > 0 && (
+            <> {result.records_invalid} unusable entries skipped.</>
+          )}
+        </span>
+      )}
     </li>
   )
 }

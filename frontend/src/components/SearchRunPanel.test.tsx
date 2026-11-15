@@ -125,7 +125,7 @@ describe('SearchRunPanel', () => {
     render(<SearchRunPanel />)
 
     expect(
-      await screen.findByText(/no usable source is configured/i),
+      await screen.findByText(/no approved source is available/i),
     ).toBeInTheDocument()
     const startButton = screen.getByRole('button', { name: /start search/i })
     expect(startButton).toBeDisabled()
@@ -222,6 +222,71 @@ describe('SearchRunPanel', () => {
     ).toBeInTheDocument()
     expect(screen.getByText('company_1')).toBeInTheDocument()
     expect(screen.getByText(/1 record found/i)).toBeInTheDocument()
+  })
+
+  it('renders connector counters for a completed source', async () => {
+    const user = userEvent.setup()
+    setupFetch({
+      status: {
+        ...completedRun,
+        source_results: [
+          {
+            source_id: 'company_1',
+            status: 'completed',
+            records_found: 3,
+            error_code: null,
+            records_relevant: 1,
+            records_filtered: 2,
+            records_invalid: 0,
+          },
+        ],
+      },
+    })
+
+    render(<SearchRunPanel />)
+
+    await user.click(
+      await screen.findByRole('button', { name: /start search/i }),
+    )
+
+    expect(await screen.findByText(/3 records found/i)).toBeInTheDocument()
+    expect(screen.getByText(/1 matched your target roles/i)).toBeInTheDocument()
+    expect(
+      screen.getByText(/2 filtered out by role or location/i),
+    ).toBeInTheDocument()
+  })
+
+  it('shows a failed source with its stable error code', async () => {
+    const user = userEvent.setup()
+    setupFetch({
+      status: {
+        ...completedRun,
+        status: 'failed',
+        error_summary:
+          'All configured sources failed; the accepted run remains consumed.',
+        source_results: [
+          {
+            source_id: 'company_1',
+            status: 'failed',
+            records_found: 0,
+            error_code: 'http_429',
+            records_relevant: 0,
+            records_filtered: 0,
+            records_invalid: 0,
+          },
+        ],
+      },
+    })
+
+    render(<SearchRunPanel />)
+
+    await user.click(
+      await screen.findByRole('button', { name: /start search/i }),
+    )
+
+    expect(await screen.findByText(/^failed$/i)).toBeInTheDocument()
+    expect(screen.getByText(/http_429/)).toBeInTheDocument()
+    expect(screen.getByRole('alert')).toHaveTextContent(/remains consumed/i)
   })
 
   it('stops polling once the run reaches a terminal state', async () => {

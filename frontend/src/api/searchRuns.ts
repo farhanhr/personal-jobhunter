@@ -26,6 +26,9 @@ export type SourceRunResult = {
   status: string
   records_found: number
   error_code: string | null
+  records_relevant?: number
+  records_filtered?: number
+  records_invalid?: number
 }
 
 export type SearchRunStatus = {
