@@ -251,3 +251,218 @@ sa.Index(
     sync_outbox.c.status,
     sync_outbox.c.next_attempt_at_utc,
 )
+
+# ---------------------------------------------------------------------------
+# Read model
+#
+# These tables mirror the canonical Google Sheets tabs and are a rebuildable
+# cache, never a second editable master (ADR-015). Columns therefore follow the
+# accepted sheet headers exactly, and values are stored as text because Sheets
+# returns text. A full refresh replaces the whole snapshot inside one
+# transaction, so a failed or partial refresh leaves the last known good
+# snapshot untouched.
+# ---------------------------------------------------------------------------
+
+WORK_MODE_VALUES = ("onsite", "hybrid", "remote", "unknown")
+ROLE_MATCH_TYPE_VALUES = (
+    "canonical_title",
+    "approved_alias",
+    "description_keyword",
+    "needs_review",
+)
+REMOTE_SCOPE_VALUES = (
+    "indonesia_only",
+    "worldwide",
+    "country_restricted",
+    "unknown",
+    "not_applicable",
+)
+AVAILABILITY_STATUS_VALUES = ("open", "closed_confirmed", "unknown")
+USER_STATUS_VALUES = ("new", "saved", "ignored")
+SOURCE_TYPE_VALUES = (
+    "greenhouse",
+    "lever",
+    "ashby",
+    "permitted_career_page",
+    "linkedin_post_manual",
+)
+PROVENANCE_METHOD_VALUES = ("ats_api", "permitted_page", "manual_user_input")
+OBSERVATION_STATUS_VALUES = ("seen", "source_unavailable", "unknown")
+REFRESH_OUTCOME_VALUES = ("succeeded", "failed")
+READ_MODEL_STATE_ID = "google_sheets"
+
+
+def _enum_check(column: str, values: tuple[str, ...]) -> str:
+    """Build a NULL-tolerant CHECK so an absent value stays absent."""
+
+    allowed = ", ".join(f"'{value}'" for value in values)
+    return f"{column} IS NULL OR {column} IN ({allowed})"
+
+
+opportunities_read_model = sa.Table(
+    "opportunities_read_model",
+    metadata,
+    sa.Column("opportunity_id", sa.String(40), primary_key=True),
+    sa.Column("company_name", sa.Text, nullable=True),
+    sa.Column("job_title_original", sa.Text, nullable=True),
+    sa.Column("job_title_normalized", sa.Text, nullable=True),
+    sa.Column("target_role_id", sa.String(40), nullable=True),
+    sa.Column("role_match_type", sa.String(32), nullable=True),
+    sa.Column("role_match_reason", sa.Text, nullable=True),
+    sa.Column("location_raw", sa.Text, nullable=True),
+    sa.Column("country", sa.String(100), nullable=True),
+    sa.Column("province", sa.String(100), nullable=True),
+    sa.Column("city", sa.String(100), nullable=True),
+    sa.Column("location_status", sa.String(20), nullable=True),
+    sa.Column("work_mode", sa.String(20), nullable=True),
+    sa.Column("remote_scope", sa.String(24), nullable=True),
+    sa.Column("employment_type", sa.String(50), nullable=True),
+    sa.Column("experience_level", sa.String(50), nullable=True),
+    sa.Column("description", sa.Text, nullable=True),
+    sa.Column("required_skills_json", sa.Text, nullable=True),
+    sa.Column("posted_at", sa.String(32), nullable=True),
+    sa.Column("deadline", sa.String(32), nullable=True),
+    sa.Column("availability_status", sa.String(20), nullable=True),
+    # User-owned in the canonical sheet: a refresh must copy, never overwrite.
+    sa.Column("user_status", sa.String(20), nullable=True),
+    sa.Column("first_seen_at_utc", sa.String(32), nullable=True),
+    sa.Column("last_seen_at_utc", sa.String(32), nullable=True),
+    sa.Column("created_at_utc", sa.String(32), nullable=True),
+    sa.Column("updated_at_utc", sa.String(32), nullable=True),
+    # Application tracking is user-owned data. Values are free text (or text
+    # dates) so the local cache never coerces or rejects a canonical value.
+    sa.Column("job_type", sa.Text, nullable=True),
+    sa.Column("date_applied", sa.Text, nullable=True),
+    sa.Column("application_status", sa.Text, nullable=True),
+    sa.Column("follow_up_date", sa.Text, nullable=True),
+    sa.Column("interview_date", sa.Text, nullable=True),
+    sa.Column("vacancy_url", sa.Text, nullable=True),
+    sa.Column("notes", sa.Text, nullable=True),
+    sa.CheckConstraint(
+        _enum_check("role_match_type", ROLE_MATCH_TYPE_VALUES),
+        name="ck_opportunities_read_model_role_match_type",
+    ),
+    sa.CheckConstraint(
+        _enum_check("location_status", LOCATION_STATUS_VALUES),
+        name="ck_opportunities_read_model_location_status",
+    ),
+    sa.CheckConstraint(
+        _enum_check("work_mode", WORK_MODE_VALUES),
+        name="ck_opportunities_read_model_work_mode",
+    ),
+    sa.CheckConstraint(
+        _enum_check("remote_scope", REMOTE_SCOPE_VALUES),
+        name="ck_opportunities_read_model_remote_scope",
+    ),
+    sa.CheckConstraint(
+        _enum_check("availability_status", AVAILABILITY_STATUS_VALUES),
+        name="ck_opportunities_read_model_availability_status",
+    ),
+    sa.CheckConstraint(
+        _enum_check("user_status", USER_STATUS_VALUES),
+        name="ck_opportunities_read_model_user_status",
+    ),
+)
+
+job_sources_read_model = sa.Table(
+    "job_sources_read_model",
+    metadata,
+    sa.Column("source_id", sa.String(40), primary_key=True),
+    sa.Column(
+        "opportunity_id",
+        sa.String(40),
+        sa.ForeignKey(
+            "opportunities_read_model.opportunity_id",
+            ondelete="CASCADE",
+        ),
+        nullable=False,
+    ),
+    sa.Column("source_type", sa.String(32), nullable=True),
+    sa.Column("source_url", sa.Text, nullable=True),
+    sa.Column("external_source_id", sa.String(200), nullable=True),
+    sa.Column("author_name", sa.Text, nullable=True),
+    sa.Column("author_role", sa.Text, nullable=True),
+    sa.Column("source_text_excerpt", sa.Text, nullable=True),
+    sa.Column("posted_at", sa.String(32), nullable=True),
+    sa.Column("captured_at_utc", sa.String(32), nullable=True),
+    sa.Column("last_seen_at_utc", sa.String(32), nullable=True),
+    sa.Column("provenance_method", sa.String(24), nullable=True),
+    sa.Column("observation_status", sa.String(24), nullable=True),
+    sa.CheckConstraint(
+        _enum_check("source_type", SOURCE_TYPE_VALUES),
+        name="ck_job_sources_read_model_source_type",
+    ),
+    sa.CheckConstraint(
+        _enum_check("provenance_method", PROVENANCE_METHOD_VALUES),
+        name="ck_job_sources_read_model_provenance_method",
+    ),
+    sa.CheckConstraint(
+        _enum_check("observation_status", OBSERVATION_STATUS_VALUES),
+        name="ck_job_sources_read_model_observation_status",
+    ),
+)
+
+# Contacts is deferred from MVP. No read-model table, refresh dependency, API,
+# or fixture may assume a Contacts tab exists (ADR-021).
+
+# One row describing the last refresh. ``last_full_refresh_at_utc`` only moves
+# forward on a successful publication, so a failed attempt cannot make stale data
+# look fresh.
+sheets_sync_state = sa.Table(
+    "sheets_sync_state",
+    metadata,
+    sa.Column("state_id", sa.String(32), primary_key=True),
+    sa.Column("last_full_refresh_at_utc", sa.String(32), nullable=True),
+    sa.Column("last_attempt_at_utc", sa.String(32), nullable=True),
+    sa.Column("last_refresh_outcome", sa.String(16), nullable=True),
+    sa.Column("last_refresh_error_code", sa.String(64), nullable=True),
+    sa.Column("spreadsheet_schema_version", sa.String(32), nullable=True),
+    sa.Column("updated_at_utc", sa.String(32), nullable=False),
+    sa.CheckConstraint(
+        f"state_id = '{READ_MODEL_STATE_ID}'",
+        name="ck_sheets_sync_state_singleton",
+    ),
+    sa.CheckConstraint(
+        _enum_check("last_refresh_outcome", REFRESH_OUTCOME_VALUES),
+        name="ck_sheets_sync_state_outcome",
+    ),
+)
+
+sa.Index(
+    "ix_opportunities_read_model_status_seen",
+    opportunities_read_model.c.location_status,
+    opportunities_read_model.c.last_seen_at_utc,
+)
+sa.Index(
+    "ix_opportunities_read_model_user_status",
+    opportunities_read_model.c.user_status,
+)
+sa.Index(
+    "ix_opportunities_read_model_target_role",
+    opportunities_read_model.c.target_role_id,
+)
+# Dashboard queries filter date windows on these two columns (P0/12).
+sa.Index(
+    "ix_opportunities_read_model_date_applied",
+    opportunities_read_model.c.date_applied,
+)
+sa.Index(
+    "ix_opportunities_read_model_interview_date",
+    opportunities_read_model.c.interview_date,
+)
+sa.Index(
+    "ix_job_sources_read_model_opportunity",
+    job_sources_read_model.c.opportunity_id,
+)
+# Dedup contract (ADR-022): ``source_id`` is the only unique identity. The same
+# (source_type, external_source_id) may occur on several canonical rows, so this
+# is a non-unique lookup that callers must treat as potentially ambiguous.
+sa.Index(
+    "ix_job_sources_read_model_external_identity",
+    job_sources_read_model.c.source_type,
+    job_sources_read_model.c.external_source_id,
+)
+sa.Index(
+    "ix_job_sources_read_model_source_url",
+    job_sources_read_model.c.source_url,
+)
