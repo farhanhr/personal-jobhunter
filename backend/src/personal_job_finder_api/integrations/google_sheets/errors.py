@@ -22,13 +22,19 @@ class GoogleSheetsError(Exception):
         message: str,
         *,
         reconnect_required: bool = False,
+        retry_after_seconds: int | None = None,
     ) -> None:
         super().__init__(message)
         self.code = code
         self.reconnect_required = reconnect_required
+        self.retry_after_seconds = retry_after_seconds
 
 
-def translate_http_status(status: int) -> GoogleSheetsError:
+def translate_http_status(
+    status: int,
+    *,
+    retry_after_seconds: int | None = None,
+) -> GoogleSheetsError:
     """Map an HTTP status to a sanitized error without reading the body."""
 
     if status == 401:
@@ -53,11 +59,19 @@ def translate_http_status(status: int) -> GoogleSheetsError:
         return GoogleSheetsError(
             "rate_limited",
             "Google Sheets rate-limited the request. Try again later.",
+            retry_after_seconds=retry_after_seconds,
+        )
+    if status in {400, 409, 422}:
+        return GoogleSheetsError(
+            "invalid_request",
+            "Google Sheets rejected the request. Check the spreadsheet schema "
+            "and the configured tabs.",
         )
     if status >= 500:
         return GoogleSheetsError(
             "server_error",
             "Google Sheets is temporarily unavailable. Try again later.",
+            retry_after_seconds=retry_after_seconds,
         )
     return GoogleSheetsError(
         "api_error",

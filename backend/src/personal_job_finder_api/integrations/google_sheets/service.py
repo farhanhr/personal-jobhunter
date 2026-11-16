@@ -23,6 +23,7 @@ from personal_job_finder_api.integrations.google_sheets.credentials import (
 )
 from personal_job_finder_api.integrations.google_sheets.oauth import (
     GoogleSheetsCredentialsProvider,
+    build_google_credentials_provider,
 )
 from personal_job_finder_api.integrations.google_sheets.preflight import (
     PreflightResult,
@@ -37,12 +38,25 @@ class GoogleSheetsFoundation:
     config: GoogleSheetsConfig
     client: GoogleSheetsClient
     preflight: SpreadsheetPreflightService
+    transport: SheetsTransport
 
     def check(self) -> PreflightResult:
         return self.preflight.check(self.config.spreadsheet_id)
 
     def initialize(self) -> PreflightResult:
         return self.preflight.initialize(self.config.spreadsheet_id)
+
+
+def build_google_sheets_transport(settings: Settings) -> SheetsTransport:
+    """Build the production transport from local settings."""
+
+    config = GoogleSheetsConfig.from_settings(settings)
+    credentials = build_google_credentials_provider(settings).load()
+    service = build_google_sheets_service(
+        credentials=credentials,
+        timeout_seconds=config.timeout_seconds,
+    )
+    return GoogleApiSheetsTransport(service)
 
 
 def build_google_sheets_foundation(
@@ -71,4 +85,5 @@ def build_google_sheets_foundation(
         config=config,
         client=client,
         preflight=SpreadsheetPreflightService(transport, client=client),
+        transport=transport,
     )

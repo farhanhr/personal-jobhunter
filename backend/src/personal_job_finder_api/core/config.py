@@ -77,6 +77,9 @@ class Settings:
     google_sheets_max_batch_ranges: int = field(
         default_factory=lambda: _env_int("GOOGLE_SHEETS_MAX_BATCH_RANGES", 100)
     )
+    google_sheets_batch_size: int = field(
+        default_factory=lambda: _env_int("GOOGLE_SHEETS_BATCH_SIZE", 25)
+    )
     google_oauth_client_file: Path | None = None
     google_token_file: Path | None = None
     google_keyring_service_name: str = field(

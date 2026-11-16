@@ -20,6 +20,7 @@ SHEETS_SCOPE = ("https://www.googleapis.com/auth/spreadsheets",)
 SHEETS_API_ORIGIN = "https://sheets.googleapis.com"
 DEFAULT_TIMEOUT_SECONDS = 10.0
 DEFAULT_MAX_BATCH_RANGES = 100
+DEFAULT_BATCH_SIZE = 25
 MAX_SPREADSHEET_ID_LENGTH = 200
 
 _SPREADSHEET_ID = re.compile(r"^[A-Za-z0-9_-]{20,200}$")
@@ -86,6 +87,7 @@ class GoogleSheetsConfig:
     spreadsheet_id: str = field(repr=False)
     timeout_seconds: float = DEFAULT_TIMEOUT_SECONDS
     max_batch_ranges: int = DEFAULT_MAX_BATCH_RANGES
+    batch_size: int = DEFAULT_BATCH_SIZE
 
     def __post_init__(self) -> None:
         _validate_spreadsheet_id(self.spreadsheet_id)
@@ -99,6 +101,11 @@ class GoogleSheetsConfig:
                 "batch_limit_invalid",
                 "The Google Sheets batch limit must be greater than zero.",
             )
+        if self.batch_size <= 0:
+            raise GoogleSheetsError(
+                "batch_size_invalid",
+                "The Google Sheets batch size must be greater than zero.",
+            )
 
     @classmethod
     def from_settings(cls, settings: Settings) -> GoogleSheetsConfig:
@@ -106,6 +113,7 @@ class GoogleSheetsConfig:
             spreadsheet_id=settings.google_sheets_spreadsheet_id or "",
             timeout_seconds=settings.google_sheets_timeout_seconds,
             max_batch_ranges=settings.google_sheets_max_batch_ranges,
+            batch_size=settings.google_sheets_batch_size,
         )
 
 

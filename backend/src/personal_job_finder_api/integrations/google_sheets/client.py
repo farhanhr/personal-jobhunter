@@ -28,6 +28,19 @@ from personal_job_finder_api.integrations.google_sheets.errors import (
 RAW_INPUT_OPTION = "RAW"
 
 
+def column_letter(index: int) -> str:
+    """Convert a 1-based column index to its spreadsheet letter."""
+
+    if index < 1:
+        raise ValueError("column index must be 1 or greater")
+    letters: list[str] = []
+    remaining = index
+    while remaining:
+        remaining, remainder = divmod(remaining - 1, 26)
+        letters.append(chr(ord("A") + remainder))
+    return "".join(reversed(letters))
+
+
 class SheetsTransport(Protocol):
     """Low-level request boundary implemented by the official client adapter."""
 
@@ -77,6 +90,12 @@ class GoogleSheetsClient:
             )
         self._transport = transport
         self._max_batch_ranges = max_batch_ranges
+
+    @property
+    def max_batch_ranges(self) -> int:
+        """The configured ceiling for ranges in one batch request."""
+
+        return self._max_batch_ranges
 
     def get_metadata(self, spreadsheet_id: str) -> SpreadsheetMetadata:
         response = self._transport.get_spreadsheet(spreadsheet_id)
@@ -139,14 +158,57 @@ class GoogleSheetsClient:
             headers[tab] = tuple(cells)
         return headers
 
+    def get_values(
+        self,
+        spreadsheet_id: str,
+        ranges: Sequence[str],
+    ) -> dict[str, list[list[str]]]:
+        """Read whole-column or row ranges in one bounded batch.
+
+        Each returned value list starts at the first row of its range, so a
+        caller can derive the spreadsheet row number from the list index.
+        """
+
+        if not ranges:
+            return {}
+        if len(ranges) > self._max_batch_ranges:
+            raise GoogleSheetsError(
+                "batch_too_large",
+                "The Google Sheets read batch exceeds the configured limit.",
+            )
+        response = self._transport.batch_get_values(spreadsheet_id, list(ranges))
+        value_ranges = response.get("valueRanges") if isinstance(response, dict) else None
+        if not isinstance(value_ranges, list) or len(value_ranges) != len(ranges):
+            raise _malformed_response()
+
+        result: dict[str, list[list[str]]] = {}
+        for requested, value_range in zip(ranges, value_ranges, strict=True):
+            if not isinstance(value_range, dict):
+                raise _malformed_response()
+            values = value_range.get("values")
+            if values is None:
+                result[requested] = []
+                continue
+            if not isinstance(values, list):
+                raise _malformed_response()
+            rows: list[list[str]] = []
+            for row in values:
+                if not isinstance(row, list):
+                    raise _malformed_response()
+                rows.append(["" if cell is None else str(cell) for cell in row])
+            result[requested] = rows
+        return result
+
     def batch_update_values(
         self,
         spreadsheet_id: str,
         data: list[dict[str, Any]],
-        *,
-        value_input_option: str = RAW_INPUT_OPTION,
     ) -> dict[str, Any]:
-        """Write multiple ranges in one request, always using ``RAW``."""
+        """Write multiple ranges in one request.
+
+        ``RAW`` is not configurable: job text is untrusted and must never be
+        interpreted as a formula.
+        """
 
         if not data:
             raise GoogleSheetsError(
@@ -191,6 +253,30 @@ class GoogleSheetsClient:
         if not data:
             return {}
         return self.batch_update_values(spreadsheet_id, data)
+
+
+MAX_RETRY_AFTER_SECONDS = 300
+
+
+def _retry_after_seconds(exc: HttpError) -> int | None:
+    """Read a bounded ``Retry-After`` hint without exposing the response body."""
+
+    headers = getattr(getattr(exc, "resp", None), "headers", None)
+    if headers is None:
+        return None
+    try:
+        raw = headers.get("retry-after")
+    except AttributeError:
+        return None
+    if raw is None:
+        return None
+    try:
+        seconds = int(str(raw).strip())
+    except (TypeError, ValueError):
+        return None
+    if seconds < 1:
+        return None
+    return min(seconds, MAX_RETRY_AFTER_SECONDS)
 
 
 def _malformed_response() -> GoogleSheetsError:
@@ -266,7 +352,10 @@ class GoogleApiSheetsTransport:
             raise
         except HttpError as exc:
             status = int(getattr(exc.resp, "status", 0) or 0)
-            raise translate_http_status(status) from None
+            raise translate_http_status(
+                status,
+                retry_after_seconds=_retry_after_seconds(exc),
+            ) from None
         except Exception as exc:
             raise translate_transport_exception(exc) from None
         if not isinstance(result, dict):

@@ -5,7 +5,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Any
 
-from sqlalchemy import distinct, func, select, update
+from sqlalchemy import and_, distinct, func, or_, select, update
 from sqlalchemy.engine import Connection
 
 from personal_job_finder_api.db.tables import (
@@ -17,7 +17,30 @@ from personal_job_finder_api.db.tables import (
 
 OUTBOX_DESTINATION = "google_sheets"
 OUTBOX_ENTITY_TYPE = "opportunity"
+OUTBOX_ENTITY_TYPE_SOURCE = "job_source"
 OUTBOX_OPERATION = "upsert"
+OUTBOX_OPERATION_WITHDRAW = "withdraw"
+
+
+def _outbox_matches_run() -> Any:
+    """Join predicate matching a projection to the run that observed its entity.
+
+    Opportunity projections key on ``opportunity_id``; source projections key on
+    ``source_id``. Both are durable run references, unlike the mutable
+    ``sync_outbox.run_id`` column.
+    """
+
+    run_entities = opportunity_run_refs
+    return or_(
+        and_(
+            sync_outbox.c.entity_type == OUTBOX_ENTITY_TYPE,
+            sync_outbox.c.entity_id == run_entities.c.opportunity_id,
+        ),
+        and_(
+            sync_outbox.c.entity_type == OUTBOX_ENTITY_TYPE_SOURCE,
+            sync_outbox.c.entity_id == run_entities.c.source_id,
+        ),
+    )
 
 
 @dataclass(frozen=True, slots=True)
@@ -377,10 +400,15 @@ class OpportunityStagingRepository:
             update(sync_outbox)
             .where(sync_outbox.c.outbox_id == existing["outbox_id"])
             .values(
-                run_id=run_id,
+                # ``run_id`` records who first queued this projection; durable run
+                # references, not this column, decide a run's sync obligation.
+                operation=operation,
                 payload_json=payload_json,
                 payload_hash=payload_hash,
                 status="pending",
+                # New content is new work, so it gets a fresh attempt budget.
+                # Without this reset a row that exhausted its retries could never
+                # be claimed again and would sit at ``pending`` forever.
                 attempt_count=0,
                 next_attempt_at_utc=None,
                 last_error_code=None,
@@ -390,6 +418,31 @@ class OpportunityStagingRepository:
             )
         )
         return True
+
+    def has_delivered_outbox(
+        self,
+        connection: Connection,
+        *,
+        entity_id: str,
+        destination: str = OUTBOX_DESTINATION,
+        entity_type: str = OUTBOX_ENTITY_TYPE,
+    ) -> bool:
+        """Report whether a projection may already exist in the spreadsheet.
+
+        ``synced`` obviously exists remotely. ``in_progress``, ``retry_wait``, and
+        ``blocked`` may exist too: each can follow a write whose response was lost,
+        so treating them as "never sent" would leave a stale row behind.
+        """
+
+        row = self.find_outbox(
+            connection,
+            entity_id=entity_id,
+            destination=destination,
+            entity_type=entity_type,
+        )
+        if row is None:
+            return False
+        return row["status"] in ("synced", "in_progress", "retry_wait", "blocked")
 
     def discard_unsent_outbox(
         self,
@@ -401,9 +454,10 @@ class OpportunityStagingRepository:
     ) -> int:
         """Withdraw queued work for a record that became local-only.
 
-        Only rows that have not started sending are removed. A row already
-        ``in_progress`` or ``synced`` is left alone; retracting a written row is
-        the sync worker's responsibility.
+        Only rows that provably never left this machine are removed, meaning no
+        send attempt was ever recorded. Anything with an attempt, an in-flight
+        claim, or a delivered row must be handled as a withdrawal instead, because
+        the remote write may have succeeded even if the response was lost.
         """
 
         result = connection.execute(
@@ -412,6 +466,7 @@ class OpportunityStagingRepository:
                 sync_outbox.c.entity_type == entity_type,
                 sync_outbox.c.entity_id == entity_id,
                 sync_outbox.c.status.in_(("pending", "retry_wait", "blocked")),
+                sync_outbox.c.attempt_count == 0,
             )
         )
         return int(result.rowcount or 0)
@@ -419,23 +474,19 @@ class OpportunityStagingRepository:
     def count_unsynced_for_run(self, connection: Connection, run_id: str) -> int:
         """Count distinct projections still awaiting canonical synchronization.
 
-        The count is scoped to opportunities observed by this run, so pending work
-        from unrelated runs cannot keep this run permanently pending. Excluded
-        local-only records have no outbox row and therefore do not count.
+        Both opportunity and job-source projections count, because a run is not
+        synchronized until its provenance rows are also in the canonical store.
+        The count is scoped through durable run references, so pending work from
+        unrelated runs cannot keep this run pending. Excluded local-only records
+        have no outbox row and therefore do not count.
         """
 
         statement = (
             select(func.count(distinct(sync_outbox.c.outbox_id)))
-            .select_from(
-                sync_outbox.join(
-                    opportunity_run_refs,
-                    sync_outbox.c.entity_id == opportunity_run_refs.c.opportunity_id,
-                )
-            )
+            .select_from(sync_outbox.join(opportunity_run_refs, _outbox_matches_run()))
             .where(
                 opportunity_run_refs.c.run_id == run_id,
                 sync_outbox.c.destination == OUTBOX_DESTINATION,
-                sync_outbox.c.entity_type == OUTBOX_ENTITY_TYPE,
                 sync_outbox.c.status != "synced",
             )
         )

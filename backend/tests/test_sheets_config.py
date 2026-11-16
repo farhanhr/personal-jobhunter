@@ -22,11 +22,13 @@ def settings_stub(
     spreadsheet_id: str | None = VALID_SPREADSHEET_ID,
     timeout_seconds: float = 10.0,
     max_batch_ranges: int = 100,
+    batch_size: int = 25,
 ) -> SimpleNamespace:
     return SimpleNamespace(
         google_sheets_spreadsheet_id=spreadsheet_id,
         google_sheets_timeout_seconds=timeout_seconds,
         google_sheets_max_batch_ranges=max_batch_ranges,
+        google_sheets_batch_size=batch_size,
     )
 
 

@@ -149,6 +149,89 @@ def test_unexpected_failures_print_no_traceback(
     assert "google_sheets_error" in output.err
 
 
+def test_sync_reports_counters_without_leaking_configuration(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    from personal_job_finder_api.sync.dispatcher import SyncOutcome
+
+    class StubConfig:
+        spreadsheet_id = SPREADSHEET_ID
+        batch_size = 25
+        max_batch_ranges = 100
+
+    class StubFoundation:
+        config = StubConfig()
+        transport = object()
+
+    class StubDispatcher:
+        def __init__(self, engine, **_kwargs) -> None:
+            pass
+
+        def recover(self) -> int:
+            return 0
+
+        def dispatch_due(self) -> SyncOutcome:
+            return SyncOutcome(synced=3, failed=0, blocked=0, remaining=0)
+
+    class StubEngine:
+        def dispose(self) -> None:
+            pass
+
+    monkeypatch.setattr(
+        cli_module, "build_google_sheets_foundation", lambda settings: StubFoundation()
+    )
+    monkeypatch.setattr(cli_module, "create_database_engine", lambda settings: StubEngine())
+    monkeypatch.setattr(cli_module, "SyncDispatcher", StubDispatcher)
+
+    exit_code = cli_module.main(["sync"])
+
+    output = capsys.readouterr()
+    assert exit_code == 0
+    assert "synced=3" in output.out
+    assert SPREADSHEET_ID not in output.out
+
+
+def test_sync_returns_a_nonzero_exit_code_when_work_is_left_blocked(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    from personal_job_finder_api.sync.dispatcher import SyncOutcome
+
+    class StubConfig:
+        spreadsheet_id = SPREADSHEET_ID
+        batch_size = 25
+        max_batch_ranges = 100
+
+    class StubFoundation:
+        config = StubConfig()
+        transport = object()
+
+    class StubDispatcher:
+        def __init__(self, engine, **_kwargs) -> None:
+            pass
+
+        def recover(self) -> int:
+            return 0
+
+        def dispatch_due(self) -> SyncOutcome:
+            return SyncOutcome(synced=0, failed=1, blocked=1, remaining=1)
+
+    class StubEngine:
+        def dispose(self) -> None:
+            pass
+
+    monkeypatch.setattr(
+        cli_module, "build_google_sheets_foundation", lambda settings: StubFoundation()
+    )
+    monkeypatch.setattr(cli_module, "create_database_engine", lambda settings: StubEngine())
+    monkeypatch.setattr(cli_module, "SyncDispatcher", StubDispatcher)
+
+    exit_code = cli_module.main(["sync"])
+
+    assert exit_code == 1
+
+
 def test_auth_failure_returns_a_nonzero_exit_code_without_traceback(
     monkeypatch: pytest.MonkeyPatch,
     capsys: pytest.CaptureFixture[str],

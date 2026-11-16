@@ -78,6 +78,22 @@ def rows(engine: Engine, table) -> list[dict[str, object]]:
         return [dict(row) for row in connection.execute(sa.select(table)).mappings().all()]
 
 
+def outbox_for(engine: Engine, entity_type: str) -> list[dict[str, object]]:
+    """Return outbox rows for one entity type, ordered by creation."""
+
+    with engine.connect() as connection:
+        return [
+            dict(row)
+            for row in connection.execute(
+                sa.select(sync_outbox)
+                .where(sync_outbox.c.entity_type == entity_type)
+                .order_by(sync_outbox.c.created_at_utc, sync_outbox.c.outbox_id)
+            )
+            .mappings()
+            .all()
+        ]
+
+
 def test_successful_staging_persists_the_record_and_its_provenance(
     engine: Engine,
 ) -> None:
@@ -142,12 +158,12 @@ def test_reingesting_unchanged_data_does_not_queue_new_outbox_work(
     engine: Engine,
 ) -> None:
     service(engine).stage(run_id="run_1", records=[record()])
-    before = rows(engine, sync_outbox)[0]
+    before = outbox_for(engine, "opportunity")[0]
 
     service(engine).stage(run_id="run_2", records=[record()])
-    after = rows(engine, sync_outbox)[0]
+    after = outbox_for(engine, "opportunity")[0]
 
-    assert count(engine, sync_outbox) == 1
+    assert count(engine, sync_outbox) == 2
     assert after["outbox_id"] == before["outbox_id"]
     assert after["updated_at_utc"] == before["updated_at_utc"]
 
@@ -174,15 +190,15 @@ def test_changed_record_updates_the_row_and_keeps_its_identity(
 
 def test_changed_record_produces_pending_sync_work(engine: Engine) -> None:
     service(engine).stage(run_id="run_1", records=[record()])
-    first = rows(engine, sync_outbox)[0]
+    first = outbox_for(engine, "opportunity")[0]
 
     service(engine).stage(
         run_id="run_2",
         records=[record(description="<p>Changed description.</p>")],
     )
 
-    updated = rows(engine, sync_outbox)[0]
-    assert count(engine, sync_outbox) == 1
+    updated = outbox_for(engine, "opportunity")[0]
+    assert count(engine, sync_outbox) == 2
     assert updated["outbox_id"] == first["outbox_id"]
     assert updated["payload_hash"] != first["payload_hash"]
     assert updated["status"] == "pending"
@@ -203,7 +219,7 @@ def test_changed_record_after_sync_requeues_the_projection(engine: Engine) -> No
         records=[record(title="Backend Engineer II")],
     )
 
-    updated = rows(engine, sync_outbox)[0]
+    updated = outbox_for(engine, "opportunity")[0]
     assert updated["status"] == "pending"
     assert updated["synced_at_utc"] is None
 
@@ -269,7 +285,7 @@ def test_outbox_payload_contains_no_credentials_or_configuration(
 ) -> None:
     service(engine).stage(run_id="run_1", records=[record()])
 
-    payload = rows(engine, sync_outbox)[0]["payload_json"]
+    payload = outbox_for(engine, "opportunity")[0]["payload_json"]
     lowered = str(payload).casefold()
     for forbidden in (
         "access_token",
@@ -286,7 +302,7 @@ def test_outbox_payload_bounds_the_description(engine: Engine) -> None:
     huge = "x" * 200_000
     service(engine).stage(run_id="run_1", records=[record(description=huge)])
 
-    payload = json.loads(rows(engine, sync_outbox)[0]["payload_json"])
+    payload = json.loads(outbox_for(engine, "opportunity")[0]["payload_json"])
     assert len(payload["description"]) <= 50_000
 
 
@@ -326,7 +342,7 @@ def test_staged_data_survives_a_new_engine_instance(
     restarted = create_engine_for_url(database_url)
     try:
         assert count(restarted, opportunities) == 1
-        assert count(restarted, sync_outbox) == 1
+        assert count(restarted, sync_outbox) == 2
         assert rows(restarted, opportunities)[0]["job_title"] == "Backend Engineer"
     finally:
         restarted.dispose()
@@ -375,16 +391,16 @@ def test_excluded_records_are_staged_but_not_queued_for_sheets(
 
     assert count(engine, opportunities) == 2
     # Only the main-feed record needs a Sheets projection.
-    assert count(engine, sync_outbox) == 1
-    queued = json.loads(rows(engine, sync_outbox)[0]["payload_json"])
+    assert count(engine, sync_outbox) == 2
+    queued = json.loads(outbox_for(engine, "opportunity")[0]["payload_json"])
     assert queued["feed_bucket"] == "main"
 
 
 def test_review_records_are_queued_for_sheets(engine: Engine) -> None:
     service(engine).stage(run_id="run_1", records=[record(location="Remote")])
 
-    assert count(engine, sync_outbox) == 1
-    queued = json.loads(rows(engine, sync_outbox)[0]["payload_json"])
+    assert count(engine, sync_outbox) == 2
+    queued = json.loads(outbox_for(engine, "opportunity")[0]["payload_json"])
     assert queued["feed_bucket"] == "review"
 
 
@@ -399,7 +415,7 @@ def test_payload_keeps_the_original_first_seen_time_after_an_update(
         records=[record(title="Backend Engineer II")],
     )
 
-    payload = json.loads(rows(engine, sync_outbox)[0]["payload_json"])
+    payload = json.loads(outbox_for(engine, "opportunity")[0]["payload_json"])
     assert payload["first_seen_at_utc"] == first_seen
     assert payload["job_title"] == "Backend Engineer II"
 
@@ -409,7 +425,7 @@ def test_payload_hash_is_a_hash_of_the_payload(engine: Engine) -> None:
 
     service(engine).stage(run_id="run_1", records=[record()])
 
-    outbox = rows(engine, sync_outbox)[0]
+    outbox = outbox_for(engine, "opportunity")[0]
     expected = hashlib.sha256(str(outbox["payload_json"]).encode("utf-8")).hexdigest()
     assert outbox["payload_hash"] == expected
 
@@ -451,10 +467,12 @@ def test_outbox_entries_can_be_listed_for_a_later_sync(engine: Engine) -> None:
 
     pending = service(engine).list_outbox(status="pending")
 
-    assert len(pending) == 1
-    assert pending[0].status == "pending"
-    assert pending[0].entity_id.startswith("opp_")
-    assert pending[0].run_id == "run_1"
+    assert len(pending) == 2
+    assert {item.status for item in pending} == {"pending"}
+    assert {item.entity_type for item in pending} == {"opportunity", "job_source"}
+    opportunity = next(item for item in pending if item.entity_type == "opportunity")
+    assert opportunity.entity_id.startswith("opp_")
+    assert opportunity.run_id == "run_1"
     assert service(engine).list_outbox(status="synced") == []
 
 
@@ -465,8 +483,8 @@ def test_staging_reports_the_run_association(engine: Engine) -> None:
     assert summary.feed_main == 1
     assert summary.feed_review == 0
     assert summary.feed_excluded == 0
-    assert summary.outbox_enqueued == 1
-    assert summary.pending_sync_count == 1
+    assert summary.outbox_enqueued == 2
+    assert summary.pending_sync_count == 2
 
 
 def test_pending_sync_count_drops_once_the_projection_is_synced(engine: Engine) -> None:
@@ -480,9 +498,11 @@ def test_pending_sync_count_drops_once_the_projection_is_synced(engine: Engine) 
     assert summary.pending_sync_count == 0
 
 
-def test_record_that_becomes_local_only_withdraws_unsent_projection(engine: Engine) -> None:
+def test_record_that_becomes_local_only_withdraws_unsent_projections(
+    engine: Engine,
+) -> None:
     service(engine).stage(run_id="run_1", records=[record()])
-    assert count(engine, sync_outbox) == 1
+    assert count(engine, sync_outbox) == 2
 
     summary = service(engine).stage(
         run_id="run_2",
@@ -494,11 +514,16 @@ def test_record_that_becomes_local_only_withdraws_unsent_projection(engine: Engi
     assert count(engine, sync_outbox) == 0
 
 
-def test_withdrawn_projection_does_not_delete_already_synced_rows(engine: Engine) -> None:
+def test_withdrawn_projection_never_deletes_an_already_synced_row(
+    engine: Engine,
+) -> None:
     service(engine).stage(run_id="run_1", records=[record()])
     with engine.begin() as connection:
         connection.execute(sync_outbox.update().values(status="synced"))
 
     service(engine).stage(run_id="run_2", records=[record(location="Singapore")])
 
-    assert count(engine, sync_outbox) == 1
+    rows_after = outbox_for(engine, "opportunity")
+    assert len(rows_after) == 1
+    assert rows_after[0]["status"] == "pending"
+    assert rows_after[0]["operation"] == "withdraw"

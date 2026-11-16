@@ -21,6 +21,7 @@ from dataclasses import dataclass
 from datetime import datetime
 
 from sqlalchemy import Engine
+from sqlalchemy.engine import Connection
 
 from personal_job_finder_api.core.time import ensure_aware_utc, format_utc, utc_now
 from personal_job_finder_api.db.engine import immediate_transaction
@@ -37,7 +38,9 @@ from personal_job_finder_api.domain.source_urls import validate_source_url
 from personal_job_finder_api.repositories.opportunities import (
     OUTBOX_DESTINATION,
     OUTBOX_ENTITY_TYPE,
+    OUTBOX_ENTITY_TYPE_SOURCE,
     OUTBOX_OPERATION,
+    OUTBOX_OPERATION_WITHDRAW,
     OpportunityStagingRepository,
     OutboxEntry,
     StagedOpportunity,
@@ -50,6 +53,18 @@ SHEETS_CELL_MAX_CHARS = 50_000
 FEED_MAIN = "main"
 FEED_REVIEW = "review"
 FEED_EXCLUDED = "excluded"
+
+OBSERVATION_SEEN = "seen"
+
+# The accepted contract defines these provenance methods. A source type without a
+# mapping stays blank instead of claiming provenance the contract does not define.
+PROVENANCE_BY_SOURCE_TYPE: dict[str, str] = {
+    "greenhouse": "ats_api",
+    "lever": "ats_api",
+    "ashby": "ats_api",
+    "permitted_career_page": "permitted_page",
+    "linkedin_post_manual": "manual_user_input",
+}
 
 
 @dataclass(frozen=True, slots=True)
@@ -99,6 +114,8 @@ class OpportunityStagingService:
             "updated": 0,
             "unchanged": 0,
             "outbox": 0,
+            "withdrawn": 0,
+            "preserved": 0,
             FEED_MAIN: 0,
             FEED_REVIEW: 0,
             FEED_EXCLUDED: 0,
@@ -143,13 +160,20 @@ class OpportunityStagingService:
                 )
 
                 if bucket == FEED_EXCLUDED:
-                    # Excluded records stay staged for audit, but they must not be
-                    # written into the user-facing Opportunities sheet. They are
-                    # therefore local-only by design, so any unsent projection
-                    # queued by an earlier run is withdrawn here.
-                    self._repository.discard_unsent_outbox(
+                    # Excluded records stay staged for audit but must not enter the
+                    # user-facing feed. A projection that never reached the sheet is
+                    # withdrawn outright. A projection that may already exist remotely
+                    # is replaced by an explicit withdrawal marker, so the sheet does
+                    # not keep a stale eligible row.
+                    self._queue_withdrawal(
                         connection,
-                        entity_id=staged.opportunity_id,
+                        run_id=run_id,
+                        staged=staged,
+                        source=source,
+                        record=record,
+                        first_seen_at_utc=first_seen_at_utc,
+                        staged_at=staged_at,
+                        counters=counters,
                     )
                     continue
 
@@ -161,7 +185,7 @@ class OpportunityStagingService:
                 )
                 queued = self._repository.upsert_outbox(
                     connection,
-                    outbox_id=f"outbox_{source.source_id.removeprefix('src_')}",
+                    outbox_id=_opportunity_outbox_id(source.source_id),
                     run_id=run_id,
                     entity_id=staged.opportunity_id,
                     payload_json=payload_json,
@@ -169,6 +193,20 @@ class OpportunityStagingService:
                     now_utc=staged_at,
                 )
                 if queued:
+                    counters["outbox"] += 1
+
+                source_payload_json = _job_source_payload_json(record, source)
+                queued_source = self._repository.upsert_outbox(
+                    connection,
+                    outbox_id=_source_outbox_id(source.source_id),
+                    run_id=run_id,
+                    entity_id=source.source_id,
+                    payload_json=source_payload_json,
+                    payload_hash=_payload_hash(source_payload_json),
+                    now_utc=staged_at,
+                    entity_type=OUTBOX_ENTITY_TYPE_SOURCE,
+                )
+                if queued_source:
                     counters["outbox"] += 1
 
             pending_sync_count = self._repository.count_unsynced_for_run(
@@ -188,6 +226,77 @@ class OpportunityStagingService:
             feed_review=counters[FEED_REVIEW],
             feed_excluded=counters[FEED_EXCLUDED],
         )
+
+    def _queue_withdrawal(
+        self,
+        connection: Connection,
+        *,
+        run_id: str,
+        staged: StagedOpportunity,
+        source: StagedSource,
+        record: OpportunityRecord,
+        first_seen_at_utc: str,
+        staged_at: str,
+        counters: dict[str, int],
+    ) -> None:
+        """Retire projections for a record that is no longer in the feed.
+
+        The accepted contract defines no delete or tombstone semantics, and
+        deleting a row would destroy the user's own ``user_status`` value. A
+        projection that certainly never left this machine is withdrawn locally; a
+        projection that may already be in the spreadsheet is replaced by an
+        explicit ``withdraw`` marker that the dispatcher applies non-destructively.
+
+        "May have been delivered" includes a retried or blocked projection, because
+        either can follow a write whose response was lost.
+        """
+
+        opportunity_delivered = self._repository.has_delivered_outbox(
+            connection,
+            entity_id=staged.opportunity_id,
+        )
+        source_delivered = self._repository.has_delivered_outbox(
+            connection,
+            entity_id=source.source_id,
+            entity_type=OUTBOX_ENTITY_TYPE_SOURCE,
+        )
+
+        # Discard first, then re-queue the withdrawal markers. Discarding only
+        # removes work that provably never left this machine.
+        counters["withdrawn"] += self._repository.discard_unsent_outbox(
+            connection,
+            entity_id=staged.opportunity_id,
+        )
+        counters["withdrawn"] += self._repository.discard_unsent_outbox(
+            connection,
+            entity_id=source.source_id,
+            entity_type=OUTBOX_ENTITY_TYPE_SOURCE,
+        )
+
+        if opportunity_delivered:
+            payload_json = _payload_json(
+                record,
+                staged,
+                FEED_EXCLUDED,
+                first_seen_at_utc=first_seen_at_utc,
+                operation=OUTBOX_OPERATION_WITHDRAW,
+            )
+            if self._repository.upsert_outbox(
+                connection,
+                outbox_id=_opportunity_outbox_id(source.source_id),
+                run_id=run_id,
+                entity_id=staged.opportunity_id,
+                payload_json=payload_json,
+                payload_hash=_payload_hash(payload_json),
+                now_utc=staged_at,
+                operation=OUTBOX_OPERATION_WITHDRAW,
+            ):
+                counters["outbox"] += 1
+
+        if source_delivered:
+            # A source row is provenance: it records where the job came from and
+            # has no feed status of its own, so it is deliberately left in place.
+            counters["preserved"] += 1
 
     def list_outbox(self, *, status: str | None = None) -> list[OutboxEntry]:
         with self._engine.connect() as connection:
@@ -216,6 +325,14 @@ def _feed_bucket(record: OpportunityRecord) -> str:
     if is_review_candidate(record):
         return FEED_REVIEW
     return FEED_EXCLUDED
+
+
+def _opportunity_outbox_id(source_id: str) -> str:
+    return f"outbox_opp_{source_id.removeprefix('src_')}"
+
+
+def _source_outbox_id(source_id: str) -> str:
+    return f"outbox_src_{source_id.removeprefix('src_')}"
 
 
 def _build_opportunity(
@@ -321,6 +438,7 @@ def _payload_json(
     bucket: str,
     *,
     first_seen_at_utc: str,
+    operation: str = OUTBOX_OPERATION,
 ) -> str:
     """Build the Sheets projection, excluding configuration and credentials.
 
@@ -355,6 +473,8 @@ def _payload_json(
         # First-seen is immutable; a later re-ingest must not move it.
         "first_seen_at_utc": first_seen_at_utc,
         "last_seen_at_utc": staged.last_seen_at_utc,
+        "created_at_utc": staged.created_at_utc,
+        "updated_at_utc": staged.updated_at_utc,
         "availability_status": staged.availability_status,
         "feed_bucket": bucket,
         "source_type": record.source.source_type,
@@ -362,7 +482,39 @@ def _payload_json(
         "external_source_id": record.source.external_source_id,
         "destination": OUTBOX_DESTINATION,
         "entity_type": OUTBOX_ENTITY_TYPE,
-        "operation": OUTBOX_OPERATION,
+        "operation": operation,
+    }
+    return json.dumps(payload, sort_keys=True, separators=(",", ":"), ensure_ascii=False)
+
+
+def _job_source_payload_json(
+    record: OpportunityRecord,
+    source: StagedSource,
+    *,
+    operation: str = OUTBOX_OPERATION,
+) -> str:
+    """Build the ``Job_Sources`` projection for one source record.
+
+    Only values the connector actually observed are included. Author fields and a
+    post excerpt are absent for an ATS record, so they stay blank rather than
+    being guessed.
+    """
+
+    payload = {
+        "source_id": source.source_id,
+        "opportunity_id": source.opportunity_id,
+        "source_type": source.source_type,
+        "source_url": source.source_url,
+        "safe_source_url": source.safe_source_url,
+        "external_source_id": source.external_source_id,
+        "captured_at_utc": source.captured_at_utc,
+        "last_seen_at_utc": source.last_checked_at_utc,
+        "posted_at": _format_optional(record.posted_at),
+        "provenance_method": PROVENANCE_BY_SOURCE_TYPE.get(source.source_type, ""),
+        "observation_status": OBSERVATION_SEEN,
+        "destination": OUTBOX_DESTINATION,
+        "entity_type": OUTBOX_ENTITY_TYPE_SOURCE,
+        "operation": operation,
     }
     return json.dumps(payload, sort_keys=True, separators=(",", ":"), ensure_ascii=False)
 

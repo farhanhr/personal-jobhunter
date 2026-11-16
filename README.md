@@ -5,9 +5,10 @@ It helps one person find relevant opportunities from curated official company so
 and user-provided LinkedIn hiring posts. It does **not** apply for jobs, message
 recruiters, or automate LinkedIn.
 
-**Current status:** Core search, durable opportunity staging, local read APIs, and the
-Google Sheets authentication/preflight foundation are implemented. The outbox
-dispatcher and a dedicated job-feed screen are still pending.
+**Current status:** Core search, durable opportunity staging, local read APIs, the
+Google Sheets authentication/preflight foundation, and a durable outbox dispatcher are
+implemented. The `Run_History` projection, the manual Sync API, and a dedicated job-feed
+screen are still pending.
 
 ## Product boundaries
 
@@ -20,8 +21,8 @@ dispatcher and a dedicated job-feed screen are still pending.
 - Maximum two accepted runs per operational day; 12-hour cooldown; 06:00
   `Asia/Jakarta` reset; one active run.
 - Google Sheets is the intended canonical user-facing record store; SQLite owns
-  operational state, durable staging, and pending sync work. Authentication and
-  spreadsheet preflight exist, but outbox synchronization is not implemented yet.
+  operational state, durable staging, and pending sync work. Synchronization is manual
+  and never starts on its own.
 - No background scheduler, auto-apply, recruiter messaging, or LinkedIn browser
   automation.
 
@@ -49,11 +50,14 @@ dispatcher and a dedicated job-feed screen are still pending.
 - **Google Sheets foundation** — desktop OAuth with the Sheets-only scope, keyring-first
   credential storage with a private-file fallback, a bounded official Sheets API v4
   adapter, and read-only spreadsheet preflight with explicit safe initialization.
+- **Durable outbox dispatcher** — projects staged opportunities and source provenance
+  into `Opportunities` and `Job_Sources` with atomic claiming, payload-hash fencing,
+  idempotent upsert keyed on `opportunity_id` / `source_id`, bounded `RAW` batches,
+  exponential backoff, and restart recovery. It is invoked manually and never runs a
+  connector or consumes search quota.
 
-The outbox dispatcher, `Job_Sources` projection, manual Sync action, and automatic
-synchronization are **not implemented yet**; staged records currently remain local until
-that work is completed. A dedicated job-feed screen in the dashboard is also not
-implemented yet.
+The `Run_History` projection, the manual Sync API, automatic synchronization, and a
+dedicated job-feed screen are **not implemented yet**.
 
 ## API surface
 
@@ -237,6 +241,63 @@ uv run python -m personal_job_finder_api.integrations.google_sheets.cli disconne
 Revoking access from the Google account page also works; the next command then reports
 `reconnect_required` and the unusable credential is discarded automatically.
 
+### Manual synchronization
+
+Synchronization is explicit and process-local. It never runs a connector, never consumes
+search quota, and never starts automatically.
+
+```bash
+cd backend
+uv run python -m personal_job_finder_api.integrations.google_sheets.cli sync
+uv run python -m personal_job_finder_api.integrations.google_sheets.cli recover
+uv run python -m personal_job_finder_api.integrations.google_sheets.cli requeue \
+  --outbox-id outbox_opp_<id>
+```
+
+Behavior worth knowing:
+
+- Rows are matched on `opportunity_id` and `source_id`. A retry after a lost response
+  updates the existing row instead of appending a duplicate.
+- `user_status` is user-owned. An update carries the value currently in the sheet, and a
+  brand-new row starts at the contract default `new`.
+- Transient failures (timeout, network, 429, 5xx) become `retry_wait` with capped
+  exponential backoff; a bounded `Retry-After` hint is honored. Invalid credentials,
+  permission errors, a missing spreadsheet, or a header mismatch become `blocked`.
+- `recover` returns work abandoned by a crashed run to the retry queue without ever
+  marking it synchronized. It only touches SQLite, so it works even when the stored
+  Google credential is the problem:
+
+  ```bash
+  uv run python -m personal_job_finder_api.integrations.google_sheets.cli recover
+  ```
+
+- Every write is re-read before it is settled. `batchUpdate` is not transactional, so a
+  partial failure can apply some rows; re-reading means a second attempt finds the row by
+  identity instead of appending a duplicate.
+
+- The accepted contract defines no delete or tombstone semantics, and deleting a row
+  would destroy a `user_status` the user set. So when a record leaves the feed:
+  - a projection that provably never left this machine is withdrawn locally;
+  - a projection that may already be in the sheet is rewritten with
+    `location_status = excluded`, keeping `user_status` intact;
+  - `Job_Sources` rows are provenance and are left in place.
+
+  Only a location-based exclusion has a contract-valid way to say "not in the feed".
+  If a record were excluded for another reason, the projection is `blocked` with
+  `withdrawal_unsupported` rather than being given a misleading status.
+
+Blocked work is never retried automatically. After fixing the cause, re-enable it:
+
+```bash
+uv run python -m personal_job_finder_api.integrations.google_sheets.cli requeue \
+  --outbox-id outbox_opp_<id>
+```
+
+Manual sorting of the spreadsheet is supported because identities are re-read on every
+dispatch. Do not repurpose the reserved identity columns (`opportunity_id`, `source_id`);
+they are the only upsert key. Two independent processes syncing to the same spreadsheet at
+the same time are not supported, because row positions are not transactional.
+
 External OAuth applications in **Testing** status can receive refresh tokens that expire
 after seven days. A weekly reconnect may therefore be necessary until the app is
 published or exempted; this is expected Google behavior, not a Sheets integration bug.
@@ -248,6 +309,7 @@ published or exempted; this is expected Google behavior, not a Sheets integratio
 | `GOOGLE_TOKEN_FILE` | `<data-dir>/credentials/google-token.json` | Keyring fallback token file |
 | `GOOGLE_SHEETS_TIMEOUT_SECONDS` | `10` | Bounded Sheets request timeout |
 | `GOOGLE_SHEETS_MAX_BATCH_RANGES` | `100` | Maximum ranges per value batch |
+| `GOOGLE_SHEETS_BATCH_SIZE` | `25` | Maximum rows written per batch |
 | `GOOGLE_OAUTH_TIMEOUT_SECONDS` | `300` | Loopback callback wait |
 | `GOOGLE_KEYRING_SERVICE_NAME` | `personal-job-finder` | Keyring service label |
 

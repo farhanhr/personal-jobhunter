@@ -140,7 +140,7 @@ def test_successful_run_stages_records_and_outbox_before_completion(
     assert result is RunStatus.COMPLETED_PENDING_SYNC
     assert row["status"] == "completed_pending_sync"
     assert count(engine, opportunities) == 2
-    assert count(engine, sync_outbox) == 2
+    assert count(engine, sync_outbox) == 4
     summary = json.loads(row["source_summary_json"])[0]
     assert summary["records_found"] == 2
 
@@ -239,7 +239,7 @@ def test_recovery_after_an_interrupted_run_leaves_no_partial_staging(
 
     assert run_row(engine, next_run)["status"] == "completed_pending_sync"
     assert count(engine, opportunities) == 1
-    assert count(engine, sync_outbox) == 1
+    assert count(engine, sync_outbox) == 2
 
 
 def test_one_bad_record_discards_every_source_record_of_the_run(
@@ -311,7 +311,7 @@ def test_second_run_does_not_duplicate_staged_records(
     ).run(second_run.run.run_id)
 
     assert count(engine, opportunities) == 1
-    assert count(engine, sync_outbox) == 1
+    assert count(engine, sync_outbox) == 2
     assert run_row(engine, second_run.run.run_id)["status"] == "completed_pending_sync"
 
 
@@ -338,10 +338,10 @@ def test_mixed_source_failure_with_pending_sync_reports_pending_sync(
     row = run_row(engine, run_id)
     assert result is RunStatus.COMPLETED_PENDING_SYNC
     assert row["status"] == "completed_pending_sync"
-    assert count(engine, sync_outbox) == 1
+    assert count(engine, sync_outbox) == 2
     assert "1 of 2 configured sources failed" in (row["error_summary"] or "")
     progress = json.loads(row["progress_json"])
-    assert progress["pending_sync"] == 1
+    assert progress["pending_sync"] == 2
     summaries = json.loads(row["source_summary_json"])
     assert [summary["status"] for summary in summaries] == ["completed", "failed"]
     assert summaries[1]["error_code"] == "http_503"
