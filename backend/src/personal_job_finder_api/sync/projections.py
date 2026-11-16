@@ -12,7 +12,7 @@ an update must carry the value already in the sheet instead of overwriting it.
 
 from __future__ import annotations
 
-from collections.abc import Mapping, Sequence
+from collections.abc import Collection, Mapping, Sequence
 from dataclasses import dataclass
 from typing import Any
 
@@ -20,6 +20,9 @@ from personal_job_finder_api.domain.text import normalize_words
 from personal_job_finder_api.integrations.google_sheets.config import (
     JOB_SOURCE_HEADERS,
     OPPORTUNITY_HEADERS,
+    OPPORTUNITY_TRACKER_HEADERS,
+    OPPORTUNITY_USER_OWNED_HEADERS,
+    PENDING_USER_FIELDS_KEY,
 )
 
 OPPORTUNITY_TAB = "Opportunities"
@@ -28,7 +31,7 @@ JOB_SOURCE_TAB = "Job_Sources"
 # Only these columns are user-managed. Everything else is application-owned and
 # may be refreshed from the source of truth.
 USER_OWNED_COLUMNS: Mapping[str, tuple[str, ...]] = {
-    OPPORTUNITY_TAB: ("user_status",),
+    OPPORTUNITY_TAB: OPPORTUNITY_USER_OWNED_HEADERS,
     JOB_SOURCE_TAB: (),
 }
 
@@ -50,6 +53,15 @@ PROVENANCE_METHODS: Mapping[str, str] = {
 OPPORTUNITY_OBSERVATION_STATUS = "seen"
 
 EXCLUDED_LOCATION_STATUS = "excluded"
+
+# Payload keys whose sheet header has a different name, or that feed more than one
+# header. Without this map a pending tracker patch would treat these columns as
+# "not supplied" and copy the previous sheet value, silently reverting a discovery
+# update such as a renamed job title.
+OPPORTUNITY_SUPPLIED_BY_PAYLOAD_KEY: Mapping[str, tuple[str, ...]] = {
+    "job_title": ("job_title_original", "job_title_normalized"),
+    "posted_at_utc": ("posted_at",),
+}
 
 
 class ProjectionError(Exception):
@@ -109,6 +121,7 @@ def project_opportunity(
 
     identity = _required_identity(payload, "opportunity_id")
     title = _text(payload.get("job_title"))
+    pending_user_fields = _pending_user_fields(payload)
 
     cells: dict[str, Any] = {
         "opportunity_id": identity,
@@ -133,11 +146,15 @@ def project_opportunity(
         "posted_at": _text(payload.get("posted_at_utc")),
         "deadline": "",
         "availability_status": _text(payload.get("availability_status")),
-        "user_status": "",
+        # User-owned values are supplied only by a tracker patch. A normal
+        # discovery payload leaves these blank and the merge below copies the
+        # canonical sheet values.
+        "user_status": _text(payload.get("user_status")),
         "first_seen_at_utc": _text(payload.get("first_seen_at_utc")),
         "last_seen_at_utc": _text(payload.get("last_seen_at_utc")),
         "created_at_utc": _text(payload.get("created_at_utc")),
         "updated_at_utc": _text(payload.get("updated_at_utc")),
+        **{header: _text(payload.get(header)) for header in OPPORTUNITY_TRACKER_HEADERS},
     }
 
     return _build(
@@ -147,7 +164,19 @@ def project_opportunity(
         identity=identity,
         cells=cells,
         existing_row=existing_row,
+        supplied_fields=_supplied_opportunity_headers(payload),
+        pending_user_fields=pending_user_fields,
     )
+
+
+def _supplied_opportunity_headers(payload: Mapping[str, Any]) -> frozenset[str]:
+    """Translate payload keys into the sheet headers they actually populate."""
+
+    supplied = frozenset(payload) & set(OPPORTUNITY_HEADERS)
+    for key, headers in OPPORTUNITY_SUPPLIED_BY_PAYLOAD_KEY.items():
+        if key in payload:
+            supplied = supplied | set(headers)
+    return frozenset(supplied)
 
 
 def project_job_source(
@@ -199,6 +228,8 @@ def _build(
     identity: str,
     cells: Mapping[str, Any],
     existing_row: Sequence[str] | None,
+    supplied_fields: Collection[str] = (),
+    pending_user_fields: Sequence[str] = (),
 ) -> ProjectedRow:
     missing = [header for header in headers if header not in cells]
     if missing:
@@ -207,15 +238,25 @@ def _build(
             f"The projection for {tab} has no mapping for: {', '.join(missing)}.",
         )
 
-    for column in USER_OWNED_COLUMNS[tab]:
-        cells[column] = _user_owned_value(
+    if pending_user_fields:
+        ordered = _values_with_pending_fields(
             tab=tab,
-            column=column,
             headers=headers,
+            cells=cells,
             existing_row=existing_row,
+            supplied_fields=supplied_fields,
+            pending_user_fields=pending_user_fields,
         )
+    else:
+        for column in USER_OWNED_COLUMNS[tab]:
+            cells[column] = _user_owned_value(
+                tab=tab,
+                column=column,
+                headers=headers,
+                existing_row=existing_row,
+            )
+        ordered = row_values([cells[header] for header in headers])
 
-    ordered = row_values([cells[header] for header in headers])
     return ProjectedRow(
         tab=tab,
         identity_column=identity_column,
@@ -223,6 +264,82 @@ def _build(
         headers=headers,
         values=ordered,
     )
+
+
+def _values_with_pending_fields(
+    *,
+    tab: str,
+    headers: tuple[str, ...],
+    cells: Mapping[str, Any],
+    existing_row: Sequence[str] | None,
+    supplied_fields: Collection[str],
+    pending_user_fields: Sequence[str],
+) -> tuple[str, ...]:
+    """Overlay pending user edits without blanking discovery fields.
+
+    A tracker patch may contain only user-owned columns. When a row already
+    exists, every column the payload did not supply is copied from that row.
+    Pending user columns take the payload value, including an explicit blank.
+
+    Columns the connectors never capture (``employment_type``,
+    ``experience_level``, ``required_skills_json``, ``deadline``) are therefore
+    preserved from the existing row here, whereas a full discovery projection
+    blanks them. Preserving is the safer direction: a tracker edit must never
+    erase a value the canonical sheet already holds.
+    """
+
+    base = dict(zip(headers, existing_row, strict=False)) if existing_row is not None else {}
+    pending = set(pending_user_fields)
+    values: dict[str, str] = {}
+    for header in headers:
+        if header in USER_OWNED_COLUMNS[tab]:
+            if header in pending:
+                values[header] = row_values([cells[header]])[0]
+            elif existing_row is not None:
+                values[header] = row_values([base.get(header, "")])[0]
+            else:
+                values[header] = USER_OWNED_DEFAULTS.get((tab, header), "")
+        elif header in supplied_fields:
+            values[header] = row_values([cells[header]])[0]
+        else:
+            values[header] = row_values([base.get(header, "")])[0]
+
+    return row_values([values[header] for header in headers])
+
+
+def _pending_user_fields(payload: Mapping[str, Any]) -> tuple[str, ...]:
+    """Read the reserved pending-user-field list from an outbox payload."""
+
+    raw = payload.get(PENDING_USER_FIELDS_KEY)
+    if raw is None:
+        return ()
+    if isinstance(raw, (str, bytes)) or not isinstance(raw, Sequence):
+        raise ProjectionError(
+            "invalid_pending_user_fields",
+            "The pending user field list must be a sequence of header names.",
+        )
+    fields = tuple(raw)
+    if not all(isinstance(field, str) for field in fields):
+        raise ProjectionError(
+            "invalid_pending_user_fields",
+            "Every pending user field must be a header name.",
+        )
+    unknown = sorted(set(fields) - set(OPPORTUNITY_USER_OWNED_HEADERS))
+    if unknown:
+        raise ProjectionError(
+            "invalid_pending_user_fields",
+            f"Unknown pending user fields: {', '.join(unknown)}.",
+        )
+    # A declared pending field with no value is indistinguishable from an
+    # explicit blank, so it would silently erase the canonical cell. Require the
+    # value to be present, even when that value is an empty string.
+    missing = sorted(field for field in fields if field not in payload)
+    if missing:
+        raise ProjectionError(
+            "invalid_pending_user_fields",
+            f"Pending user fields without a supplied value: {', '.join(missing)}.",
+        )
+    return fields
 
 
 def _user_owned_value(

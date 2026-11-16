@@ -56,7 +56,35 @@ OPPORTUNITY_HEADERS = (
     "last_seen_at_utc",
     "created_at_utc",
     "updated_at_utc",
+    # Application-tracking fields belong to the user, not the connector. They are
+    # appended so every existing discovery column keeps its position.
+    "job_type",
+    "date_applied",
+    "application_status",
+    "follow_up_date",
+    "interview_date",
+    "vacancy_url",
+    "notes",
 )
+
+OPPORTUNITY_TRACKER_HEADERS = (
+    "job_type",
+    "date_applied",
+    "application_status",
+    "follow_up_date",
+    "interview_date",
+    "vacancy_url",
+    "notes",
+)
+
+# Columns the user owns in the canonical Opportunities tab. A connector update
+# must copy these values from the existing sheet row, never derive them.
+OPPORTUNITY_USER_OWNED_HEADERS = ("user_status", *OPPORTUNITY_TRACKER_HEADERS)
+
+# Reserved outbox payload key listing user-owned columns with a pending local
+# edit. ``upsert_outbox`` merges these values across discovery re-ingestion so a
+# connector refresh cannot discard an unsynced tracker change.
+PENDING_USER_FIELDS_KEY = "_pending_user_fields"
 
 JOB_SOURCE_HEADERS = (
     "source_id",

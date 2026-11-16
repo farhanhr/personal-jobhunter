@@ -430,6 +430,262 @@ def test_payload_hash_is_a_hash_of_the_payload(engine: Engine) -> None:
     assert outbox["payload_hash"] == expected
 
 
+def seed_pending_tracker_payload(
+    engine: Engine,
+    tracker_values: dict[str, str],
+    *,
+    status: str = "pending",
+    attempt_count: int = 2,
+    next_attempt_at_utc: str | None = None,
+) -> None:
+    """Simulate the pending user-owned payload a tracker patch will produce."""
+
+    import hashlib
+
+    stored = outbox_for(engine, "opportunity")[0]
+    payload = json.loads(str(stored["payload_json"]))
+    payload.update(tracker_values)
+    payload["_pending_user_fields"] = sorted(tracker_values)
+    payload_json = json.dumps(
+        payload,
+        sort_keys=True,
+        separators=(",", ":"),
+        ensure_ascii=False,
+    )
+    with engine.begin() as connection:
+        connection.execute(
+            sync_outbox.update()
+            .where(sync_outbox.c.outbox_id == stored["outbox_id"])
+            .values(
+                payload_json=payload_json,
+                payload_hash=hashlib.sha256(payload_json.encode("utf-8")).hexdigest(),
+                status=status,
+                attempt_count=attempt_count,
+                next_attempt_at_utc=next_attempt_at_utc,
+            )
+        )
+
+
+def test_reingestion_preserves_pending_tracker_fields(engine: Engine) -> None:
+    import hashlib
+
+    service(engine).stage(run_id="run_1", records=[record()])
+    tracker = {
+        "application_status": "Interview",
+        "interview_date": "2026-11-20",
+        "notes": "Panel scheduled.",
+    }
+    seed_pending_tracker_payload(engine, tracker)
+
+    service(engine).stage(
+        run_id="run_2",
+        records=[record(description="<p>Changed description.</p>")],
+    )
+
+    stored = outbox_for(engine, "opportunity")[0]
+    payload = json.loads(str(stored["payload_json"]))
+    assert payload["description"] == "<p>Changed description.</p>"
+    assert {header: payload[header] for header in tracker} == tracker
+    assert set(payload["_pending_user_fields"]) == set(tracker)
+    assert (
+        stored["payload_hash"]
+        == hashlib.sha256(str(stored["payload_json"]).encode("utf-8")).hexdigest()
+    )
+    assert stored["status"] == "pending"
+    assert stored["attempt_count"] == 0
+
+
+def test_reingestion_of_a_synced_row_drops_stale_tracker_values(engine: Engine) -> None:
+    service(engine).stage(run_id="run_1", records=[record()])
+    seed_pending_tracker_payload(
+        engine,
+        {"application_status": "Interview", "notes": "Already written to Sheets."},
+        status="synced",
+    )
+
+    service(engine).stage(
+        run_id="run_2",
+        records=[record(description="<p>Changed description.</p>")],
+    )
+
+    stored = outbox_for(engine, "opportunity")[0]
+    payload = json.loads(str(stored["payload_json"]))
+    assert "application_status" not in payload
+    assert "notes" not in payload
+    assert "_pending_user_fields" not in payload
+    assert stored["status"] == "pending"
+
+
+def test_unchanged_merged_payload_preserves_retry_state(engine: Engine) -> None:
+    service(engine).stage(run_id="run_1", records=[record()])
+    tracker = {"application_status": "Assessment", "vacancy_url": "https://apply.example.test/1"}
+    seed_pending_tracker_payload(
+        engine,
+        tracker,
+        status="retry_wait",
+        attempt_count=2,
+        next_attempt_at_utc="2026-11-15T05:00:00.000000Z",
+    )
+
+    service(engine).stage(run_id="run_2", records=[record()])
+
+    stored = outbox_for(engine, "opportunity")[0]
+    payload = json.loads(str(stored["payload_json"]))
+    assert {header: payload[header] for header in tracker} == tracker
+    assert stored["status"] == "retry_wait"
+    assert stored["attempt_count"] == 2
+    assert stored["next_attempt_at_utc"] == "2026-11-15T05:00:00.000000Z"
+
+
+def test_a_tracker_patch_keeps_the_existing_discovery_payload(engine: Engine) -> None:
+    import hashlib
+
+    from personal_job_finder_api.repositories.opportunities import (
+        OpportunityStagingRepository,
+    )
+
+    service(engine).stage(run_id="run_1", records=[record()])
+    stored = outbox_for(engine, "opportunity")[0]
+    patch = {
+        "opportunity_id": stored["entity_id"],
+        "notes": "Referred by a former colleague.",
+        "_pending_user_fields": ["notes"],
+    }
+    patch_json = json.dumps(patch, sort_keys=True, separators=(",", ":"), ensure_ascii=False)
+
+    with engine.begin() as connection:
+        queued = OpportunityStagingRepository().upsert_outbox(
+            connection,
+            outbox_id=str(stored["outbox_id"]),
+            run_id=None,
+            entity_id=str(stored["entity_id"]),
+            payload_json=patch_json,
+            payload_hash=hashlib.sha256(patch_json.encode("utf-8")).hexdigest(),
+            now_utc="2026-11-15T06:00:00.000000Z",
+        )
+
+    merged = outbox_for(engine, "opportunity")[0]
+    payload = json.loads(str(merged["payload_json"]))
+    assert queued is True
+    assert payload["company_name"] == "Acme Example"
+    assert payload["job_title"] == "Backend Engineer"
+    assert payload["notes"] == "Referred by a former colleague."
+    assert payload["_pending_user_fields"] == ["notes"]
+
+
+def test_a_reingest_of_a_blocked_row_still_preserves_pending_tracker_fields(
+    engine: Engine,
+) -> None:
+    service(engine).stage(run_id="run_1", records=[record()])
+    tracker = {"application_status": "Offer", "notes": "Offer received."}
+    seed_pending_tracker_payload(engine, tracker, status="blocked", attempt_count=5)
+
+    service(engine).stage(
+        run_id="run_2",
+        records=[record(description="<p>Changed description.</p>")],
+    )
+
+    stored = outbox_for(engine, "opportunity")[0]
+    payload = json.loads(str(stored["payload_json"]))
+    assert {header: payload[header] for header in tracker} == tracker
+    assert payload["description"] == "<p>Changed description.</p>"
+    # New content supersedes the blocked attempt, so the row is claimable again.
+    assert stored["status"] == "pending"
+    assert stored["attempt_count"] == 0
+    assert stored["last_error_code"] is None
+
+
+def test_a_reingest_of_an_in_progress_row_supersedes_the_inflight_payload(
+    engine: Engine,
+) -> None:
+    service(engine).stage(run_id="run_1", records=[record()])
+    tracker = {"application_status": "Interview"}
+    seed_pending_tracker_payload(engine, tracker, status="in_progress", attempt_count=1)
+    in_flight_hash = outbox_for(engine, "opportunity")[0]["payload_hash"]
+
+    service(engine).stage(
+        run_id="run_2",
+        records=[record(description="<p>Changed description.</p>")],
+    )
+
+    stored = outbox_for(engine, "opportunity")[0]
+    assert stored["status"] == "pending"
+    assert stored["payload_hash"] != in_flight_hash
+    # The in-flight worker's fenced update compares this hash, so it now matches
+    # zero rows and cannot mark the newer payload as synced.
+    payload = json.loads(str(stored["payload_json"]))
+    assert payload["application_status"] == "Interview"
+    assert payload["description"] == "<p>Changed description.</p>"
+
+
+def test_a_pending_tracker_field_without_a_value_is_rejected(engine: Engine) -> None:
+    import hashlib
+
+    from personal_job_finder_api.repositories.opportunities import (
+        OpportunityStagingRepository,
+    )
+
+    service(engine).stage(run_id="run_1", records=[record()])
+    stored = outbox_for(engine, "opportunity")[0]
+    patch_json = json.dumps(
+        {
+            "opportunity_id": stored["entity_id"],
+            "_pending_user_fields": ["notes"],
+        },
+        sort_keys=True,
+        separators=(",", ":"),
+    )
+
+    with pytest.raises(ValueError), engine.begin() as connection:
+        OpportunityStagingRepository().upsert_outbox(
+            connection,
+            outbox_id=str(stored["outbox_id"]),
+            run_id=None,
+            entity_id=str(stored["entity_id"]),
+            payload_json=patch_json,
+            payload_hash=hashlib.sha256(patch_json.encode("utf-8")).hexdigest(),
+            now_utc="2026-11-15T06:00:00.000000Z",
+        )
+
+    # The stored payload is untouched, so the user's notes are not erased.
+    assert json.loads(str(outbox_for(engine, "opportunity")[0]["payload_json"])) == json.loads(
+        str(stored["payload_json"])
+    )
+
+
+def test_a_tracker_patch_must_declare_ownership_of_its_values(engine: Engine) -> None:
+    import hashlib
+
+    from personal_job_finder_api.repositories.opportunities import (
+        OpportunityStagingRepository,
+    )
+
+    service(engine).stage(run_id="run_1", records=[record()])
+    stored = outbox_for(engine, "opportunity")[0]
+    # A user-owned value without ``_pending_user_fields`` would be silently
+    # dropped, so the caller's mistake must surface instead.
+    patch_json = json.dumps(
+        {"opportunity_id": stored["entity_id"], "notes": "Lost without ownership."},
+        sort_keys=True,
+        separators=(",", ":"),
+    )
+
+    with pytest.raises(ValueError), engine.begin() as connection:
+        OpportunityStagingRepository().upsert_outbox(
+            connection,
+            outbox_id=str(stored["outbox_id"]),
+            run_id=None,
+            entity_id=str(stored["entity_id"]),
+            payload_json=patch_json,
+            payload_hash=hashlib.sha256(patch_json.encode("utf-8")).hexdigest(),
+            now_utc="2026-11-15T06:00:00.000000Z",
+        )
+
+    assert json.loads(str(outbox_for(engine, "opportunity")[0]["payload_json"])) == json.loads(
+        str(stored["payload_json"])
+    )
+
+
 def test_unchanged_reingest_bumps_last_seen(engine: Engine) -> None:
     service(engine).stage(run_id="run_1", records=[record()])
     before = rows(engine, opportunities)[0]["last_seen_at_utc"]

@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import hashlib
+import json
 from dataclasses import dataclass
 from typing import Any
 
@@ -13,6 +15,10 @@ from personal_job_finder_api.db.tables import (
     opportunities,
     opportunity_run_refs,
     sync_outbox,
+)
+from personal_job_finder_api.integrations.google_sheets.config import (
+    OPPORTUNITY_USER_OWNED_HEADERS,
+    PENDING_USER_FIELDS_KEY,
 )
 
 OUTBOX_DESTINATION = "google_sheets"
@@ -41,6 +47,86 @@ def _outbox_matches_run() -> Any:
             sync_outbox.c.entity_id == run_entities.c.source_id,
         ),
     )
+
+
+def _pending_user_fields(payload: dict[str, Any]) -> frozenset[str]:
+    """Read and validate the pending user-owned field list in an outbox payload."""
+
+    raw = payload.get(PENDING_USER_FIELDS_KEY)
+    if raw is None:
+        return frozenset()
+    if not isinstance(raw, list) or not all(isinstance(field, str) for field in raw):
+        raise ValueError("The pending user field list must be a list of header names.")
+    unknown = set(raw) - set(OPPORTUNITY_USER_OWNED_HEADERS)
+    if unknown:
+        names = ", ".join(sorted(unknown))
+        raise ValueError(f"Unknown pending user fields: {names}.")
+    # A pending field without a value is indistinguishable from an explicit blank,
+    # so it would erase the canonical cell. Require the value to be present.
+    missing = sorted(field for field in raw if field not in payload)
+    if missing:
+        names = ", ".join(missing)
+        raise ValueError(f"Pending user fields without a supplied value: {names}.")
+    return frozenset(raw)
+
+
+def _unowned_user_values(payload: dict[str, Any], pending: frozenset[str]) -> list[str]:
+    """Report user-owned values supplied without claiming ownership of them."""
+
+    return sorted(
+        header
+        for header in OPPORTUNITY_USER_OWNED_HEADERS
+        if header in payload and header not in pending
+    )
+
+
+def _merge_opportunity_payload(existing_json: str, new_json: str) -> str:
+    """Merge a pending or discovery payload without losing user-owned edits.
+
+    New values win for columns the payload supplies. An unsynced outbox may hold
+    pending user-owned tracker values; those values and their ownership metadata
+    survive a discovery re-ingestion. A user-owned column that is neither pending
+    in the existing payload nor newly supplied by a tracker patch is removed, so
+    connector-derived data can never masquerade as user-owned input.
+    """
+
+    existing = json.loads(existing_json)
+    new = json.loads(new_json)
+    if not isinstance(existing, dict) or not isinstance(new, dict):
+        raise ValueError("An outbox payload must be a JSON object.")
+
+    existing_pending = _pending_user_fields(existing)
+    new_pending = _pending_user_fields(new)
+
+    # A user-owned value that does not declare ownership would be silently
+    # discarded, so reject it instead of dropping the user's edit.
+    unowned = _unowned_user_values(new, new_pending)
+    if unowned:
+        names = ", ".join(unowned)
+        raise ValueError(f"User-owned values supplied without pending ownership: {names}.")
+
+    merged: dict[str, Any] = {**existing, **new}
+    for header in OPPORTUNITY_USER_OWNED_HEADERS:
+        if header in new_pending:
+            merged[header] = new[header]
+        elif header in existing_pending and header in existing:
+            merged[header] = existing[header]
+        else:
+            merged.pop(header, None)
+
+    # Ownership metadata must describe only values the payload actually holds, so
+    # a pending header can never be carried forward without its value.
+    pending = sorted(header for header in existing_pending | new_pending if header in merged)
+    if pending:
+        merged[PENDING_USER_FIELDS_KEY] = pending
+    else:
+        merged.pop(PENDING_USER_FIELDS_KEY, None)
+
+    return json.dumps(merged, sort_keys=True, separators=(",", ":"), ensure_ascii=False)
+
+
+def _payload_hash(payload_json: str) -> str:
+    return hashlib.sha256(payload_json.encode("utf-8")).hexdigest()
 
 
 @dataclass(frozen=True, slots=True)
@@ -349,6 +435,11 @@ class OpportunityStagingRepository:
         An unchanged payload for an already-synced projection is a no-op. Changed
         content always becomes ``pending`` so the next sync sends the new values.
 
+        For an unsynced opportunity row, discovery values are replaced while the
+        pending user-owned tracker fields and their ownership metadata are
+        preserved. A ``synced`` row never carries stale user values forward: its
+        canonical sheet row is authoritative.
+
         A row that is ``in_progress`` is being written by a sync worker. When the
         content changes underneath it, the worker must compare ``payload_hash``
         before marking the row ``synced``. The M4B dispatcher must therefore use a
@@ -391,9 +482,21 @@ class OpportunityStagingRepository:
             )
             return True
 
+        effective_payload_json = payload_json
+        effective_payload_hash = payload_hash
+        if entity_type == OUTBOX_ENTITY_TYPE and existing["status"] != "synced":
+            # Preserve pending user-owned tracker edits across discovery
+            # re-ingestion. A synced row must not carry stale user values back
+            # into the outbox; the canonical sheet is authoritative there.
+            effective_payload_json = _merge_opportunity_payload(
+                str(existing["payload_json"]),
+                payload_json,
+            )
+            effective_payload_hash = _payload_hash(effective_payload_json)
+
         # Unchanged content never needs new work. Skipping here also preserves an
         # in-flight retry schedule instead of resetting its backoff.
-        if existing["payload_hash"] == payload_hash:
+        if existing["payload_hash"] == effective_payload_hash:
             return False
 
         connection.execute(
@@ -403,8 +506,8 @@ class OpportunityStagingRepository:
                 # ``run_id`` records who first queued this projection; durable run
                 # references, not this column, decide a run's sync obligation.
                 operation=operation,
-                payload_json=payload_json,
-                payload_hash=payload_hash,
+                payload_json=effective_payload_json,
+                payload_hash=effective_payload_hash,
                 status="pending",
                 # New content is new work, so it gets a fresh attempt budget.
                 # Without this reset a row that exhausted its retries could never

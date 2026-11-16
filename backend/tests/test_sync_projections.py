@@ -9,6 +9,8 @@ from __future__ import annotations
 
 from typing import Any
 
+import pytest
+
 from personal_job_finder_api.integrations.google_sheets.client import column_letter
 from personal_job_finder_api.integrations.google_sheets.config import (
     JOB_SOURCE_HEADERS,
@@ -48,6 +50,16 @@ OPPORTUNITY_PAYLOAD: dict[str, Any] = {
     "updated_at_utc": "2026-11-15T03:00:00.000000Z",
 }
 
+TRACKER_HEADERS = (
+    "job_type",
+    "date_applied",
+    "application_status",
+    "follow_up_date",
+    "interview_date",
+    "vacancy_url",
+    "notes",
+)
+
 JOB_SOURCE_PAYLOAD: dict[str, Any] = {
     "source_id": "src_1",
     "opportunity_id": "opp_1",
@@ -66,7 +78,8 @@ def test_column_letter_covers_the_single_and_double_letter_ranges() -> None:
     assert column_letter(1) == "A"
     assert column_letter(26) == "Z"
     assert column_letter(27) == "AA"
-    assert column_letter(len(OPPORTUNITY_HEADERS)) == "Z"
+    assert column_letter(33) == "AG"
+    assert column_letter(len(OPPORTUNITY_HEADERS)) == "AG"
 
 
 def test_every_opportunity_header_is_projected_exactly_once() -> None:
@@ -112,6 +125,183 @@ def test_unavailable_opportunity_fields_are_left_blank_not_invented() -> None:
     assert mapped["experience_level"] == ""
     assert mapped["required_skills_json"] == ""
     assert mapped["deadline"] == ""
+
+
+def test_tracker_fields_are_appended_after_the_discovery_contract() -> None:
+    assert OPPORTUNITY_HEADERS[-len(TRACKER_HEADERS) :] == TRACKER_HEADERS
+
+
+def test_new_opportunity_initializes_every_tracker_field_blank() -> None:
+    row = project_opportunity(OPPORTUNITY_PAYLOAD)
+    mapped = dict(zip(OPPORTUNITY_HEADERS, row.values, strict=True))
+
+    assert {header: mapped.get(header) for header in TRACKER_HEADERS} == {
+        header: "" for header in TRACKER_HEADERS
+    }
+
+
+def test_existing_tracker_fields_are_preserved_verbatim_on_update() -> None:
+    tracker_values = {
+        "job_type": "Development Program",
+        "date_applied": "2026-11-10",
+        "application_status": "Applied",
+        "follow_up_date": "2026-11-18",
+        "interview_date": "2026-11-20",
+        "vacancy_url": "https://apply.example.test/acme/1001",
+        "notes": "Referred by a former colleague.",
+    }
+    existing = [""] * len(OPPORTUNITY_HEADERS)
+    for header, value in tracker_values.items():
+        if header in OPPORTUNITY_HEADERS:
+            existing[OPPORTUNITY_HEADERS.index(header)] = value
+
+    row = project_opportunity(OPPORTUNITY_PAYLOAD, existing_row=existing)
+    mapped = dict(zip(OPPORTUNITY_HEADERS, row.values, strict=True))
+
+    assert {header: mapped.get(header) for header in TRACKER_HEADERS} == tracker_values
+
+
+def test_pending_tracker_fields_override_the_existing_row_but_others_survive() -> None:
+    existing = [""] * len(OPPORTUNITY_HEADERS)
+    tracked = {
+        "job_type": "Internship",
+        "date_applied": "2026-11-01",
+        "application_status": "Applied",
+        "follow_up_date": "",
+        "interview_date": "",
+        "vacancy_url": "",
+        "notes": "Old note",
+    }
+    for header, value in tracked.items():
+        if header in OPPORTUNITY_HEADERS:
+            existing[OPPORTUNITY_HEADERS.index(header)] = value
+
+    payload = dict(OPPORTUNITY_PAYLOAD)
+    payload["date_applied"] = "2026-11-15"
+    payload["notes"] = "New note"
+    payload["_pending_user_fields"] = ["date_applied", "notes"]
+
+    row = project_opportunity(payload, existing_row=existing)
+    mapped = dict(zip(OPPORTUNITY_HEADERS, row.values, strict=True))
+
+    assert mapped.get("job_type") == "Internship"
+    assert mapped.get("application_status") == "Applied"
+    assert mapped.get("date_applied") == "2026-11-15"
+    assert mapped.get("notes") == "New note"
+    assert mapped.get("company_name") == "Acme Example"
+
+
+def test_tracker_patch_without_discovery_values_preserves_the_existing_row() -> None:
+    existing = [""] * len(OPPORTUNITY_HEADERS)
+    for header, value in {
+        "company_name": "Acme Example",
+        "job_title_original": "Backend Engineer",
+        "location_status": "eligible",
+        "work_mode": "onsite",
+        "remote_scope": "not_applicable",
+        "availability_status": "unknown",
+        "user_status": "saved",
+        "job_type": "Full-time",
+    }.items():
+        if header in OPPORTUNITY_HEADERS:
+            existing[OPPORTUNITY_HEADERS.index(header)] = value
+
+    payload = {
+        "opportunity_id": "opp_1",
+        "application_status": "Interview",
+        "interview_date": "2026-11-20",
+        "_pending_user_fields": ["application_status", "interview_date"],
+    }
+
+    row = project_opportunity(payload, existing_row=existing)
+    mapped = dict(zip(OPPORTUNITY_HEADERS, row.values, strict=True))
+
+    assert mapped.get("company_name") == "Acme Example"
+    assert mapped.get("job_title_original") == "Backend Engineer"
+    assert mapped.get("user_status") == "saved"
+    assert mapped.get("job_type") == "Full-time"
+    assert mapped.get("application_status") == "Interview"
+    assert mapped.get("interview_date") == "2026-11-20"
+
+
+def test_a_pending_tracker_edit_never_rewrites_a_stale_discovery_title() -> None:
+    """Discovery values must follow the payload, not the previous sheet row.
+
+    ``job_title`` and ``posted_at_utc`` are payload keys, while the sheet columns
+    are ``job_title_original``, ``job_title_normalized`` and ``posted_at``. A
+    pending tracker patch must still write the fresh discovery values; otherwise a
+    rename during re-ingestion would be silently reverted in the canonical sheet.
+    """
+
+    existing = [""] * len(OPPORTUNITY_HEADERS)
+    for header, value in {
+        "opportunity_id": "opp_1",
+        "company_name": "Acme Example",
+        "job_title_original": "Backend Engineer",
+        "job_title_normalized": "backend engineer",
+        "posted_at": "2026-01-01",
+        "notes": "Old note",
+    }.items():
+        existing[OPPORTUNITY_HEADERS.index(header)] = value
+
+    payload = dict(OPPORTUNITY_PAYLOAD)
+    payload["job_title"] = "Senior Backend Engineer"
+    payload["posted_at_utc"] = "2026-11-01"
+    payload["notes"] = "New note"
+    payload["_pending_user_fields"] = ["notes"]
+
+    row = project_opportunity(payload, existing_row=existing)
+    mapped = dict(zip(OPPORTUNITY_HEADERS, row.values, strict=True))
+
+    assert mapped["job_title_original"] == "Senior Backend Engineer"
+    assert mapped["job_title_normalized"] == "senior backend engineer"
+    assert mapped["posted_at"] == "2026-11-01"
+    assert mapped["notes"] == "New note"
+
+
+def test_an_explicit_blank_pending_value_clears_the_canonical_cell() -> None:
+    existing = [""] * len(OPPORTUNITY_HEADERS)
+    for header, value in {
+        "opportunity_id": "opp_1",
+        "notes": "Clear me",
+        "application_status": "Applied",
+    }.items():
+        existing[OPPORTUNITY_HEADERS.index(header)] = value
+
+    payload = {
+        "opportunity_id": "opp_1",
+        "notes": "",
+        "application_status": "Applied",
+        "_pending_user_fields": ["notes"],
+    }
+
+    row = project_opportunity(payload, existing_row=existing)
+    mapped = dict(zip(OPPORTUNITY_HEADERS, row.values, strict=True))
+
+    assert mapped["notes"] == ""
+    assert mapped["application_status"] == "Applied"
+
+
+def test_vacancy_url_is_never_derived_from_source_url() -> None:
+    payload = dict(OPPORTUNITY_PAYLOAD)
+    payload["source_url"] = "https://boards.greenhouse.io/acme/jobs/1001"
+
+    row = project_opportunity(payload)
+    mapped = dict(zip(OPPORTUNITY_HEADERS, row.values, strict=True))
+
+    assert mapped["vacancy_url"] == ""
+
+
+def test_a_pending_field_without_a_value_is_rejected() -> None:
+    """Declaring ownership without supplying a value would erase the cell."""
+
+    payload = {
+        "opportunity_id": "opp_1",
+        "_pending_user_fields": ["notes"],
+    }
+
+    with pytest.raises(ProjectionError):
+        project_opportunity(payload, existing_row=[""] * len(OPPORTUNITY_HEADERS))
 
 
 def test_missing_optional_payload_keys_project_to_blank_cells() -> None:
