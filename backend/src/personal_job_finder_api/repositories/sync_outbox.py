@@ -10,7 +10,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from datetime import datetime, timedelta
 
-from sqlalchemy import Engine, or_, select, update
+from sqlalchemy import Engine, func, or_, select, update
 
 from personal_job_finder_api.core.time import format_utc
 from personal_job_finder_api.db.engine import immediate_transaction
@@ -274,3 +274,108 @@ class OutboxRepository:
             sync_outbox.c.status == OUTBOX_IN_PROGRESS,
             sync_outbox.c.payload_hash == claim.payload_hash,
         )
+
+    # -------------------------------------------------------------- inspection
+
+    def status_counts(self) -> dict[str, dict[str, int]]:
+        """Count projections per entity type and state.
+
+        Reads only durable operational state; no Google request and no payload.
+        """
+
+        counts = {
+            entity_type: dict.fromkeys(OUTBOX_STATUSES, 0)
+            for entity_type in (OUTBOX_ENTITY_TYPE, OUTBOX_ENTITY_TYPE_SOURCE)
+        }
+        with self._engine.connect() as connection:
+            rows = connection.execute(
+                select(
+                    sync_outbox.c.entity_type,
+                    sync_outbox.c.status,
+                    func.count(),
+                )
+                .where(sync_outbox.c.destination == OUTBOX_DESTINATION)
+                .group_by(sync_outbox.c.entity_type, sync_outbox.c.status)
+            ).all()
+        for entity_type, status, count in rows:
+            bucket = counts.setdefault(str(entity_type), dict.fromkeys(OUTBOX_STATUSES, 0))
+            bucket[str(status)] = int(count)
+        return counts
+
+    def due_count(self, *, now: datetime) -> int:
+        """Count projections eligible for a dispatch right now."""
+
+        now_iso = format_utc(now)
+        with self._engine.connect() as connection:
+            return int(
+                connection.execute(
+                    select(func.count())
+                    .select_from(sync_outbox)
+                    .where(
+                        sync_outbox.c.destination == OUTBOX_DESTINATION,
+                        sync_outbox.c.status.in_(ELIGIBLE_STATUSES),
+                        sync_outbox.c.attempt_count < sync_outbox.c.max_attempts,
+                        or_(
+                            sync_outbox.c.next_attempt_at_utc.is_(None),
+                            sync_outbox.c.next_attempt_at_utc <= now_iso,
+                        ),
+                    )
+                ).scalar_one()
+            )
+
+    def last_synced_at(self) -> str | None:
+        with self._engine.connect() as connection:
+            return connection.execute(
+                select(func.max(sync_outbox.c.synced_at_utc)).where(
+                    sync_outbox.c.destination == OUTBOX_DESTINATION
+                )
+            ).scalar_one()
+
+    def remaining_count(self) -> int:
+        """Count projections that have not reached the canonical store yet."""
+
+        with self._engine.connect() as connection:
+            return int(
+                connection.execute(
+                    select(func.count())
+                    .select_from(sync_outbox)
+                    .where(
+                        sync_outbox.c.destination == OUTBOX_DESTINATION,
+                        sync_outbox.c.status != OUTBOX_SYNCED,
+                    )
+                ).scalar_one()
+            )
+
+    def blocked_projections(self, *, limit: int) -> list[dict[str, object]]:
+        """Return actionable metadata for blocked work, never its payload."""
+
+        with self._engine.connect() as connection:
+            rows = (
+                connection.execute(
+                    select(
+                        sync_outbox.c.outbox_id,
+                        sync_outbox.c.entity_type,
+                        sync_outbox.c.entity_id,
+                        sync_outbox.c.attempt_count,
+                        sync_outbox.c.max_attempts,
+                        sync_outbox.c.last_error_code,
+                        sync_outbox.c.next_attempt_at_utc,
+                        sync_outbox.c.updated_at_utc,
+                    )
+                    .where(
+                        sync_outbox.c.destination == OUTBOX_DESTINATION,
+                        sync_outbox.c.status == OUTBOX_BLOCKED,
+                    )
+                    .order_by(sync_outbox.c.updated_at_utc, sync_outbox.c.outbox_id)
+                    .limit(limit)
+                )
+                .mappings()
+                .all()
+            )
+        return [dict(row) for row in rows]
+
+    def status_of(self, *, outbox_id: str) -> str | None:
+        with self._engine.connect() as connection:
+            return connection.execute(
+                select(sync_outbox.c.status).where(sync_outbox.c.outbox_id == outbox_id)
+            ).scalar_one_or_none()

@@ -17,7 +17,9 @@ from __future__ import annotations
 
 import json
 import logging
-from collections.abc import Callable, Mapping, Sequence
+import threading
+from collections.abc import Callable, Iterator, Mapping, Sequence
+from contextlib import contextmanager
 from dataclasses import asdict, dataclass
 from datetime import datetime, timedelta
 from typing import Any
@@ -27,6 +29,7 @@ from sqlalchemy import Engine
 from personal_job_finder_api.core.time import utc_now
 from personal_job_finder_api.domain.run_reconciliation import (
     reconcile_run_status,
+    reconcile_settled_runs,
     runs_observing,
 )
 from personal_job_finder_api.integrations.google_sheets.client import (
@@ -95,11 +98,13 @@ TAB_HEADERS: Mapping[str, tuple[str, ...]] = {
     JOB_SOURCE_TAB: JOB_SOURCE_HEADERS,
 }
 
-# The supported deployment is one application process. Cross-process exclusion
-# for *outbox rows* comes from SQLite's claim transaction, but spreadsheet row
-# positions are not transactional, so two independent processes syncing at once
-# are not supported. The post-write verification read turns that unsupported
-# case into a visible retry instead of a silent overwrite.
+# The supported deployment is one application process. This lock prevents two
+# dispatcher calls inside that process from interleaving their read/write steps.
+# Cross-process exclusion for *outbox rows* comes from SQLite's claim transaction,
+# but spreadsheet row positions are not transactional, so two independent processes
+# syncing at once are not supported. The post-write verification read turns that
+# unsupported case into a visible retry instead of a silent overwrite.
+_DISPATCH_LOCK = threading.Lock()
 
 
 @dataclass(frozen=True, slots=True)
@@ -113,6 +118,35 @@ class SyncOutcome:
 
     def as_dict(self) -> dict[str, int]:
         return asdict(self)
+
+
+class SyncAlreadyRunning(RuntimeError):
+    """Raised when a dispatch is already running inside this process.
+
+    The supported deployment is a single process, so this is the deterministic
+    answer to a duplicate trigger: the caller is told to wait instead of a second
+    worker starting.
+    """
+
+
+@contextmanager
+def dispatch_guard() -> Iterator[None]:
+    """Hold the single-process dispatch lock, or fail immediately.
+
+    Callers that must also protect a pre-dispatch shortcut (for example the API
+    deciding there is nothing due) should hold this guard themselves and then call
+    ``SyncDispatcher.dispatch_due(guard=False)``.
+    """
+
+    if not _DISPATCH_LOCK.acquire(blocking=False):
+        raise SyncAlreadyRunning(
+            "A sync dispatch is already running in this process. "
+            "Wait for it to finish before starting another."
+        )
+    try:
+        yield
+    finally:
+        _DISPATCH_LOCK.release()
 
 
 @dataclass(frozen=True, slots=True)
@@ -199,10 +233,17 @@ class SyncDispatcher:
             stale_before=now - STALE_IN_PROGRESS_AFTER,
         )
 
-    def dispatch_due(self) -> SyncOutcome:
-        """Dispatch eligible work until nothing is due or the claim bound is hit."""
+    def dispatch_due(self, *, guard: bool = True) -> SyncOutcome:
+        """Dispatch eligible work until nothing is due or the claim bound is hit.
 
-        return self._dispatch_loop()
+        ``guard=False`` is for callers that already hold :func:`dispatch_guard`,
+        such as the API service that must also protect its no-work shortcut.
+        """
+
+        if not guard:
+            return self._dispatch_loop()
+        with dispatch_guard():
+            return self._dispatch_loop()
 
     def _dispatch_loop(self) -> SyncOutcome:
         synced = 0
@@ -245,7 +286,12 @@ class SyncDispatcher:
         else:
             run_ids = ()
 
+        # Also sweep runs that still look pending but have no outstanding work.
+        # Without this a crash between settling a row and reconciling its run
+        # would leave the run stuck forever, because no later dispatch claims an
+        # already-synced row.
         reconcile_run_status(self._engine, run_ids=run_ids)
+        reconcile_settled_runs(self._engine)
 
         return SyncOutcome(
             synced=synced,
@@ -516,6 +562,7 @@ __all__ = [
     "DEFAULT_BATCH_SIZE",
     "PERMANENT_ERROR_CODES",
     "RETRY_AFTER_CAP_SECONDS",
+    "SyncAlreadyRunning",
     "SyncDispatcher",
     "SyncOutcome",
 ]

@@ -83,6 +83,40 @@ def reconcile_run_status(
     return tuple(changed)
 
 
+def settled_pending_runs(engine: Engine) -> tuple[str, ...]:
+    """Runs still marked pending whose projections are all settled.
+
+    A crash between settling a row and reconciling its run leaves exactly this
+    state. Because no later dispatch claims an already-synced row, the sweep has to
+    run on its own, without needing a Google transport.
+    """
+
+    with engine.connect() as connection:
+        rows = connection.exec_driver_sql(
+            "SELECT run_id FROM search_runs WHERE status = 'completed_pending_sync'"
+        ).all()
+        candidates = [str(row[0]) for row in rows]
+        return tuple(
+            run_id
+            for run_id in candidates
+            if not connection.exec_driver_sql(
+                "SELECT 1 FROM sync_outbox o "
+                "JOIN opportunity_run_refs r ON ("
+                "  (o.entity_type = 'opportunity' AND o.entity_id = r.opportunity_id)"
+                "  OR (o.entity_type = 'job_source' AND o.entity_id = r.source_id)"
+                ") "
+                "WHERE r.run_id = ? AND o.status != 'synced' LIMIT 1",
+                (run_id,),
+            ).first()
+        )
+
+
+def reconcile_settled_runs(engine: Engine) -> tuple[tuple[str, RunStatus], ...]:
+    """Reconcile runs whose synchronization duty is already finished."""
+
+    return reconcile_run_status(engine, run_ids=settled_pending_runs(engine))
+
+
 def runs_observing(
     engine: Engine,
     *,

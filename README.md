@@ -6,8 +6,8 @@ and user-provided LinkedIn hiring posts. It does **not** apply for jobs, message
 recruiters, or automate LinkedIn.
 
 **Current status:** Core search, durable opportunity staging, local read APIs, the
-Google Sheets authentication/preflight foundation, and a durable outbox dispatcher are
-implemented. The `Run_History` projection, the manual Sync API, and a dedicated job-feed
+Google Sheets authentication/preflight foundation, a durable outbox dispatcher, and the
+manual Sync API are implemented. The `Run_History` projection and a dedicated job-feed
 screen are still pending.
 
 ## Product boundaries
@@ -56,8 +56,13 @@ screen are still pending.
   exponential backoff, and restart recovery. It is invoked manually and never runs a
   connector or consumes search quota.
 
-The `Run_History` projection, the manual Sync API, automatic synchronization, and a
-dedicated job-feed screen are **not implemented yet**.
+- **Manual Sync API** — `GET /api/v1/sync/status`, `POST /api/v1/sync/retry`, and
+  `POST /api/v1/sync/outbox/{outbox_id}/requeue` expose and drive the dispatcher over
+  loopback, with per-entity counts, blocked-work guidance, and deterministic
+  duplicate-trigger handling.
+
+The `Run_History` projection, automatic synchronization, and a dedicated job-feed screen
+are **not implemented yet**.
 
 ## API surface
 
@@ -76,6 +81,9 @@ All endpoints are local and bound to loopback. Responses that expose mutable sta
 | `POST` | `/api/v1/search-runs` | Start one manual search run; requires `Idempotency-Key` |
 | `GET` | `/api/v1/search-runs/{run_id}` | Read run status and sanitized source results |
 | `GET` | `/api/v1/jobs` | Paginated main feed or review queue (`feed=main` or `review`) |
+| `GET` | `/api/v1/sync/status` | Outbox counts by state and entity type; blocked work needing action |
+| `POST` | `/api/v1/sync/retry` | Dispatch due `pending`/`retry_wait` projections once |
+| `POST` | `/api/v1/sync/outbox/{outbox_id}/requeue` | Re-enable one `blocked` projection |
 
 Example feed request:
 
@@ -244,10 +252,47 @@ Revoking access from the Google account page also works; the next command then r
 ### Manual synchronization
 
 Synchronization is explicit and process-local. It never runs a connector, never consumes
-search quota, and never starts automatically.
+search quota, and never starts automatically. It is available both as a local command and
+as the local API below.
 
 ```bash
 cd backend
+uv run python -m personal_job_finder_api.integrations.google_sheets.cli sync
+```
+
+Via the API:
+
+```bash
+curl http://127.0.0.1:8000/api/v1/sync/status
+
+curl -X POST http://127.0.0.1:8000/api/v1/sync/retry \
+  -H 'Origin: http://127.0.0.1:5173'
+```
+
+`POST /api/v1/sync/retry` runs one dispatch synchronously in the request, so the response
+reports the real outcome rather than an optimistic acceptance. It first returns abandoned
+`in_progress` work to the retry queue, then dispatches. When nothing is due it makes no
+Google request at all. A second request while a dispatch is running receives
+`409 sync_already_running` instead of starting another worker; this is a single-process
+guarantee, not a distributed lock.
+
+`GET /api/v1/sync/status` reads only local SQLite state, so it works even when the Google
+credential or spreadsheet configuration is broken. It reports counts per state for both
+`opportunity` and `job_source` projections, how many are due now, whether user action is
+required, and a capped list of blocked projections with their sanitized error code. It
+never returns payloads, tokens, spreadsheet IDs, or file paths.
+
+`POST /api/v1/sync/outbox/{outbox_id}/requeue` re-enables exactly one blocked projection
+after its cause is fixed. There is no bulk retry: silently clearing every blocked error
+could resend work whose cause was never resolved. Unknown ids return `404`; a projection
+that is not blocked returns `409`.
+
+State-changing routes require an allowed `Origin` header, and all sync responses are
+`Cache-Control: no-store`.
+
+The command line remains equivalent:
+
+```bash
 uv run python -m personal_job_finder_api.integrations.google_sheets.cli sync
 uv run python -m personal_job_finder_api.integrations.google_sheets.cli recover
 uv run python -m personal_job_finder_api.integrations.google_sheets.cli requeue \
