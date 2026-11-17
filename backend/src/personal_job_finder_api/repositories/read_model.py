@@ -26,17 +26,27 @@ depends on a Contacts tab or table.
 from __future__ import annotations
 
 import re
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
+from dataclasses import dataclass
 from datetime import datetime
 from typing import Any
 
-from sqlalchemy import Engine, func, select
+from sqlalchemy import Engine, func, select, update
 from sqlalchemy.exc import SQLAlchemyError
 
 from personal_job_finder_api.core.time import format_utc
 from personal_job_finder_api.db.engine import immediate_transaction
 from personal_job_finder_api.db.tables import (
+    AVAILABILITY_STATUS_VALUES,
+    LOCATION_STATUS_VALUES,
+    OBSERVATION_STATUS_VALUES,
+    PROVENANCE_METHOD_VALUES,
     READ_MODEL_STATE_ID,
+    REMOTE_SCOPE_VALUES,
+    ROLE_MATCH_TYPE_VALUES,
+    SOURCE_TYPE_VALUES,
+    USER_STATUS_VALUES,
+    WORK_MODE_VALUES,
     job_sources_read_model,
     opportunities_read_model,
     sheets_sync_state,
@@ -45,6 +55,33 @@ from personal_job_finder_api.db.tables import (
 REFRESH_SUCCEEDED = "succeeded"
 REFRESH_FAILED = "failed"
 
+OPPORTUNITY_TAB = "Opportunities"
+JOB_SOURCE_TAB = "Job_Sources"
+
+_READ_MODEL_TABLES = {
+    OPPORTUNITY_TAB: opportunities_read_model,
+    JOB_SOURCE_TAB: job_sources_read_model,
+}
+_IDENTITY_COLUMNS = {
+    OPPORTUNITY_TAB: "opportunity_id",
+    JOB_SOURCE_TAB: "source_id",
+}
+_ENUM_COLUMNS = {
+    OPPORTUNITY_TAB: {
+        "role_match_type": ROLE_MATCH_TYPE_VALUES,
+        "location_status": LOCATION_STATUS_VALUES,
+        "work_mode": WORK_MODE_VALUES,
+        "remote_scope": REMOTE_SCOPE_VALUES,
+        "availability_status": AVAILABILITY_STATUS_VALUES,
+        "user_status": USER_STATUS_VALUES,
+    },
+    JOB_SOURCE_TAB: {
+        "source_type": SOURCE_TYPE_VALUES,
+        "provenance_method": PROVENANCE_METHOD_VALUES,
+        "observation_status": OBSERVATION_STATUS_VALUES,
+    },
+}
+
 # Failure codes are short, sanitized identifiers (never provider text, paths, or
 # tokens), so they are safe to persist and later expose in the dashboard.
 _ERROR_CODE = re.compile(r"^[a-z][a-z0-9_]{0,63}$")
@@ -52,6 +89,93 @@ _ERROR_CODE = re.compile(r"^[a-z][a-z0-9_]{0,63}$")
 
 class SnapshotWriteError(Exception):
     """Raised when a snapshot cannot be published and was fully rolled back."""
+
+
+class SnapshotValidationError(SnapshotWriteError):
+    """Raised before any write when a snapshot row violates the table contract."""
+
+    def __init__(self, code: str, message: str) -> None:
+        super().__init__(message)
+        self.code = code
+
+
+class ReadModelSettlementError(Exception):
+    """Raised when a fenced settlement could not also update the read model."""
+
+
+@dataclass(frozen=True, slots=True)
+class ReadModelChange:
+    """One row-level read-model change applied inside an existing transaction.
+
+    ``values`` is ``None`` for a withdrawal, meaning the remote record no longer
+    exists and the local row must be removed. Otherwise every column must be
+    present, including explicit blanks, so an update cannot leave a stale value.
+    """
+
+    tab: str
+    identity: str
+    values: Mapping[str, str | None] | None
+
+
+def read_model_change(
+    *,
+    tab: str,
+    headers: Sequence[str],
+    values: Sequence[str],
+) -> ReadModelChange:
+    """Translate one verified projection row into a read-model change.
+
+    The projection headers are the canonical sheet headers, which mirror the
+    read-model columns exactly. Reusing that single mapping (instead of a second
+    hand-written map) keeps settlement and refresh aligned. A blank cell becomes
+    SQL ``NULL``; it is never dropped, so clearing a tracker field clears the
+    local value too.
+    """
+
+    table = _READ_MODEL_TABLES.get(tab)
+    identity_column = _IDENTITY_COLUMNS.get(tab)
+    if table is None or identity_column is None:
+        raise ValueError("Unknown read-model tab.")
+
+    columns = tuple(table.c.keys())
+    if tuple(headers) != columns:
+        raise ValueError("Projection headers do not match the read-model columns.")
+    if len(values) != len(columns):
+        raise ValueError("Projection values do not match the read-model columns.")
+
+    row = {
+        header: (None if value == "" else value)
+        for header, value in zip(headers, values, strict=True)
+    }
+    identity = row[identity_column]
+    if not isinstance(identity, str) or not identity.strip():
+        raise ValueError("A read-model change requires a stable identity.")
+    return ReadModelChange(tab=tab, identity=identity, values=row)
+
+
+def apply_read_model_change(connection: Any, change: ReadModelChange) -> None:
+    """Apply one change using the caller's transaction.
+
+    An update is attempted first so an opportunity update never cascades into its
+    job-source rows. A missing row is inserted. Withdrawals delete by identity and
+    are idempotent when the remote row was already absent.
+    """
+
+    table = _READ_MODEL_TABLES.get(change.tab)
+    identity_column = _IDENTITY_COLUMNS.get(change.tab)
+    if table is None or identity_column is None:
+        raise ValueError("Unknown read-model tab.")
+
+    column = table.c[identity_column]
+    if change.values is None:
+        connection.execute(table.delete().where(column == change.identity))
+        return
+
+    existing = connection.execute(select(column).where(column == change.identity)).first()
+    if existing is None:
+        connection.execute(table.insert().values(**dict(change.values)))
+        return
+    connection.execute(update(table).where(column == change.identity).values(**dict(change.values)))
 
 
 class ReadModelRepository:
@@ -72,11 +196,26 @@ class ReadModelRepository:
     ) -> None:
         """Publish a complete snapshot, or change nothing at all.
 
-        Rows are deleted and re-inserted inside one transaction, in foreign-key
-        order, so readers never observe a half-published snapshot and a rejected
-        row leaves the previous snapshot intact. Omitting the schema version
-        keeps the stored one rather than clearing it.
+        Every row is validated before the delete/insert transaction starts, so a
+        row with missing or unknown keys, a blank or duplicate identity, an
+        unknown foreign key, an invalid enum value, or a non-text value rejects
+        the whole snapshot and leaves the previous one untouched. Rows are then
+        deleted and re-inserted in foreign-key order inside one transaction, so
+        readers never observe a half-published snapshot. Omitting the schema
+        version keeps the stored one rather than clearing it.
         """
+
+        opportunity_ids = _validate_snapshot(
+            tab=OPPORTUNITY_TAB,
+            rows=opportunities,
+        )
+        _validate_snapshot(
+            tab=JOB_SOURCE_TAB,
+            rows=job_sources,
+            required_columns=("opportunity_id",),
+            reference_column="opportunity_id",
+            known_references=opportunity_ids,
+        )
 
         refreshed_iso = format_utc(refreshed_at)
         version: object = (
@@ -274,6 +413,97 @@ class ReadModelRepository:
                 .all()
             )
         return [dict(row) for row in rows]
+
+
+def _validate_snapshot(
+    *,
+    tab: str,
+    rows: Sequence[Mapping[str, Any]],
+    required_columns: Sequence[str] = (),
+    reference_column: str | None = None,
+    known_references: set[str] | None = None,
+) -> set[str]:
+    """Validate every row against the read-model table contract.
+
+    Returns the set of identities so the caller can validate child references.
+    Error messages name the tab, row position, and column only; canonical values
+    are user data and never travel into a failure code or API response.
+    """
+
+    table = _READ_MODEL_TABLES[tab]
+    identity_column = _IDENTITY_COLUMNS[tab]
+    columns = tuple(table.c.keys())
+    expected = set(columns)
+    enum_columns = _ENUM_COLUMNS[tab]
+    identities: set[str] = set()
+
+    for position, row in enumerate(rows, start=1):
+        if not isinstance(row, Mapping):
+            raise SnapshotValidationError(
+                "snapshot_invalid_row",
+                f"{tab} row {position} is not an object.",
+            )
+
+        keys = set(row)
+        missing = expected - keys
+        if missing:
+            raise SnapshotValidationError(
+                "snapshot_missing_columns",
+                f"{tab} row {position} is missing a required column.",
+            )
+        unknown = keys - expected
+        if unknown:
+            raise SnapshotValidationError(
+                "snapshot_unknown_columns",
+                f"{tab} row {position} has a column that is not part of the table.",
+            )
+
+        identity = row[identity_column]
+        if not isinstance(identity, str) or not identity.strip():
+            raise SnapshotValidationError(
+                "snapshot_missing_identity",
+                f"{tab} row {position} has no stable identity.",
+            )
+        if identity in identities:
+            raise SnapshotValidationError(
+                "snapshot_duplicate_identity",
+                f"{tab} row {position} repeats an earlier stable identity.",
+            )
+        identities.add(identity)
+
+        for column in columns:
+            value = row[column]
+            if value is not None and not isinstance(value, str):
+                raise SnapshotValidationError(
+                    "snapshot_invalid_value_type",
+                    f"{tab} row {position} has a non-text value in one column.",
+                )
+
+        for column in required_columns:
+            value = row[column]
+            if not isinstance(value, str) or not value.strip():
+                raise SnapshotValidationError(
+                    "snapshot_missing_reference",
+                    f"{tab} row {position} has no required reference.",
+                )
+
+        for column, allowed in enum_columns.items():
+            value = row[column]
+            if value is not None and value not in allowed:
+                raise SnapshotValidationError(
+                    "snapshot_invalid_enum",
+                    f"{tab} row {position} has an unaccepted value in one column.",
+                )
+
+        if reference_column is not None and known_references is not None:
+            reference = row[reference_column]
+            if reference not in known_references:
+                raise SnapshotValidationError(
+                    "snapshot_unknown_reference",
+                    f"{tab} row {position} points at a record outside this snapshot.",
+                )
+
+    return identities
 
 
 class _Unchanged:

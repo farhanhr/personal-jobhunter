@@ -11,6 +11,7 @@ from dataclasses import dataclass
 from datetime import datetime, timedelta
 
 from sqlalchemy import Engine, func, or_, select, update
+from sqlalchemy.exc import SQLAlchemyError
 
 from personal_job_finder_api.core.time import format_utc
 from personal_job_finder_api.db.engine import immediate_transaction
@@ -18,6 +19,11 @@ from personal_job_finder_api.db.tables import sync_outbox
 from personal_job_finder_api.repositories.opportunities import (
     OUTBOX_DESTINATION,
     OUTBOX_ENTITY_TYPE,
+)
+from personal_job_finder_api.repositories.read_model import (
+    ReadModelChange,
+    ReadModelSettlementError,
+    apply_read_model_change,
 )
 
 OUTBOX_PENDING = "pending"
@@ -154,6 +160,44 @@ class OutboxRepository:
             )
             return result.rowcount == 1
 
+    def settle_synced(
+        self,
+        claim: OutboxClaim,
+        *,
+        synced_at: datetime,
+        read_model: ReadModelChange,
+    ) -> bool:
+        """Fence the outbox row and apply the read-model change atomically.
+
+        The conditional update runs first. Only when it affects exactly one row is
+        the verified projection applied to the read model, and both commit or roll
+        back together. A superseded claim therefore never touches the read model
+        and leaves the newer payload pending for the next dispatch.
+        """
+
+        synced_iso = format_utc(synced_at)
+        try:
+            with immediate_transaction(self._engine) as connection:
+                result = connection.execute(
+                    update(sync_outbox)
+                    .where(*self._fence(claim))
+                    .values(
+                        status=OUTBOX_SYNCED,
+                        synced_at_utc=synced_iso,
+                        updated_at_utc=synced_iso,
+                        last_error_code=None,
+                        last_error_at_utc=None,
+                    )
+                )
+                if result.rowcount != 1:
+                    return False
+                apply_read_model_change(connection, read_model)
+                return True
+        except SQLAlchemyError as error:
+            raise ReadModelSettlementError(
+                "The outbox settlement and read-model update were rolled back."
+            ) from error
+
     def mark_retry_wait(
         self,
         claim: OutboxClaim,
@@ -269,10 +313,20 @@ class OutboxRepository:
 
     @staticmethod
     def _fence(claim: OutboxClaim) -> tuple[object, ...]:
+        """Identify the exact claim that was granted.
+
+        The attempt count changes on every claim, so a stale earlier attempt
+        cannot settle newer in-progress work even when the payload hash is
+        unchanged. The operation is included for the same reason: a withdrawn
+        record and an upsert are different intents.
+        """
+
         return (
             sync_outbox.c.outbox_id == claim.outbox_id,
             sync_outbox.c.status == OUTBOX_IN_PROGRESS,
             sync_outbox.c.payload_hash == claim.payload_hash,
+            sync_outbox.c.attempt_count == claim.attempt_count,
+            sync_outbox.c.operation == claim.operation,
         )
 
     # -------------------------------------------------------------- inspection

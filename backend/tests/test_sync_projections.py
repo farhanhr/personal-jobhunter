@@ -369,6 +369,16 @@ def test_projection_requires_a_stable_identity() -> None:
         raise AssertionError("an empty identity must not be projected")
 
 
+def test_job_source_requires_its_parent_opportunity() -> None:
+    payload = dict(JOB_SOURCE_PAYLOAD)
+    payload["opportunity_id"] = ""
+
+    with pytest.raises(ProjectionError) as rejected:
+        project_job_source(payload)
+
+    assert rejected.value.code == "missing_parent_opportunity"
+
+
 def test_every_job_source_header_is_projected_exactly_once() -> None:
     row = project_job_source(JOB_SOURCE_PAYLOAD)
     mapped = dict(zip(JOB_SOURCE_HEADERS, row.values, strict=True))

@@ -21,6 +21,7 @@ from personal_job_finder_api.db.tables import (
 )
 from personal_job_finder_api.repositories.read_model import (
     ReadModelRepository,
+    SnapshotValidationError,
     SnapshotWriteError,
 )
 
@@ -51,7 +52,7 @@ def opportunity(**overrides: Any) -> dict[str, Any]:
         "updated_at_utc": FIRST_REFRESH_ISO,
     }
     row.update(overrides)
-    return row
+    return {column.name: row.get(column.name) for column in opportunities_read_model.c}
 
 
 def source(**overrides: Any) -> dict[str, Any]:
@@ -66,7 +67,7 @@ def source(**overrides: Any) -> dict[str, Any]:
         "observation_status": "seen",
     }
     row.update(overrides)
-    return row
+    return {column.name: row.get(column.name) for column in job_sources_read_model.c}
 
 
 def repository(engine: Engine) -> ReadModelRepository:
@@ -452,3 +453,103 @@ def test_replace_snapshot_requires_ordered_identities_to_be_unique(engine: Engin
         publish(engine, opportunities=[opportunity(), opportunity()])
 
     assert counts(engine) == {"opportunities": 0, "job_sources": 0}
+
+
+def test_a_row_with_a_missing_column_is_rejected_before_publication(
+    engine: Engine,
+) -> None:
+    publish(engine)
+    malformed = opportunity(opportunity_id="opp_2")
+    malformed.pop("notes")
+
+    with pytest.raises(SnapshotValidationError) as rejected:
+        publish(
+            engine,
+            opportunities=[malformed],
+            job_sources=[],
+            refreshed_at=SECOND_REFRESH,
+        )
+
+    assert rejected.value.code == "snapshot_missing_columns"
+    assert counts(engine) == {"opportunities": 1, "job_sources": 1}
+    state = repository(engine).get_sync_state()
+    assert state is not None
+    assert state["last_full_refresh_at_utc"] == FIRST_REFRESH_ISO
+
+
+def test_a_row_with_an_unknown_column_is_rejected(engine: Engine) -> None:
+    malformed = opportunity()
+    malformed["unexpected_column"] = "value"
+
+    with pytest.raises(SnapshotValidationError) as rejected:
+        publish(engine, opportunities=[malformed], job_sources=[])
+
+    assert rejected.value.code == "snapshot_unknown_columns"
+    assert counts(engine) == {"opportunities": 0, "job_sources": 0}
+
+
+def test_a_blank_identity_is_rejected(engine: Engine) -> None:
+    with pytest.raises(SnapshotValidationError) as rejected:
+        publish(
+            engine,
+            opportunities=[opportunity(opportunity_id="  ")],
+            job_sources=[],
+        )
+
+    assert rejected.value.code == "snapshot_missing_identity"
+
+
+def test_duplicate_identities_are_rejected_with_a_stable_code(engine: Engine) -> None:
+    with pytest.raises(SnapshotValidationError) as rejected:
+        publish(engine, opportunities=[opportunity(), opportunity()])
+
+    assert rejected.value.code == "snapshot_duplicate_identity"
+
+
+def test_a_non_text_value_is_rejected(engine: Engine) -> None:
+    with pytest.raises(SnapshotValidationError) as rejected:
+        publish(
+            engine,
+            opportunities=[opportunity(company_name=123)],
+            job_sources=[],
+        )
+
+    assert rejected.value.code == "snapshot_invalid_value_type"
+
+
+def test_a_blank_explicit_tracker_value_is_stored_as_absent(
+    engine: Engine,
+) -> None:
+    publish(
+        engine,
+        opportunities=[
+            opportunity(
+                job_type=None,
+                date_applied=None,
+                application_status=None,
+                follow_up_date=None,
+                interview_date=None,
+                vacancy_url=None,
+                notes=None,
+            )
+        ],
+    )
+
+    with engine.connect() as connection:
+        stored = (
+            connection.execute(
+                sa.select(
+                    opportunities_read_model.c.job_type,
+                    opportunities_read_model.c.date_applied,
+                    opportunities_read_model.c.application_status,
+                    opportunities_read_model.c.follow_up_date,
+                    opportunities_read_model.c.interview_date,
+                    opportunities_read_model.c.vacancy_url,
+                    opportunities_read_model.c.notes,
+                )
+            )
+            .mappings()
+            .one()
+        )
+
+    assert all(value is None for value in stored.values())

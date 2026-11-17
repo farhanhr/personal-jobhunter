@@ -31,11 +31,13 @@ logger = logging.getLogger(__name__)
 
 
 class SearchRunService:
-    """Coordinate policy preflight, atomic reservation, and orchestration.
+    """Coordinate policy preflight, Sheets reconciliation, and reservation.
 
-    The service never holds a database transaction while connectors run. The
-    reservation service remains the single authority for quota, cooldown,
-    active-run, and idempotency decisions.
+    The service never holds a database transaction while connectors or Google
+    Sheets run. The reservation service remains the single authority for quota,
+    cooldown, active-run, and idempotency decisions. Reconciliation runs before
+    reservation, so an unreadable canonical snapshot rejects the start without
+    consuming quota.
     """
 
     def __init__(
@@ -43,10 +45,12 @@ class SearchRunService:
         engine: Engine,
         *,
         connector_factory: ConnectorFactory,
+        reconcile: Callable[[], None],
         clock: Callable[[], datetime] = utc_now,
     ) -> None:
         self._engine = engine
         self._clock = clock
+        self._reconcile = reconcile
         self._repository = SearchPolicyRepository()
         self._reservation = SearchReservationService(engine, clock=clock)
         self._policy = SearchPolicyService(
@@ -84,6 +88,11 @@ class SearchRunService:
             decision = self._policy.evaluate()
             if not decision.allowed:
                 raise ReservationRejected(decision)
+
+            # P0/12 §4: a bounded canonical read must precede reservation. A
+            # failure propagates before the reservation transaction starts, so
+            # no quota, cooldown, or run row is created by a failed preflight.
+            self._reconcile()
 
         return self._reservation.reserve(
             ReservationRequest(idempotency_key=normalized_key, payload=payload)

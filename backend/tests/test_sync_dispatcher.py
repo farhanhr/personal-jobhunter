@@ -15,7 +15,13 @@ import pytest
 import sqlalchemy as sa
 from sqlalchemy import Engine
 
-from personal_job_finder_api.db.tables import job_sources, opportunities, sync_outbox
+from personal_job_finder_api.db.tables import (
+    job_sources,
+    job_sources_read_model,
+    opportunities,
+    opportunities_read_model,
+    sync_outbox,
+)
 from personal_job_finder_api.domain.location import classify_location
 from personal_job_finder_api.domain.opportunities import (
     JobSourceRef,
@@ -29,6 +35,7 @@ from personal_job_finder_api.integrations.google_sheets.config import (
     REQUIRED_TABS,
 )
 from personal_job_finder_api.integrations.google_sheets.errors import GoogleSheetsError
+from personal_job_finder_api.repositories.read_model import ReadModelSettlementError
 from personal_job_finder_api.search.staging import OpportunityStagingService
 from personal_job_finder_api.sync.dispatcher import SyncDispatcher, SyncOutcome
 
@@ -218,6 +225,45 @@ def test_successful_write_marks_the_projection_synced(engine: Engine) -> None:
     assert all(row["synced_at_utc"] for row in outbox(engine))
 
 
+def test_successful_write_updates_the_read_model(engine: Engine) -> None:
+    stage(engine, run_id="run_1", records=[record()])
+    sync, _ = dispatcher(engine, FakeSheet())
+
+    sync.dispatch_due()
+
+    with engine.connect() as connection:
+        opportunity = (
+            connection.execute(
+                sa.select(
+                    opportunities_read_model.c.opportunity_id,
+                    opportunities_read_model.c.company_name,
+                    opportunities_read_model.c.job_title_original,
+                    opportunities_read_model.c.user_status,
+                    opportunities_read_model.c.notes,
+                )
+            )
+            .mappings()
+            .one()
+        )
+        source = (
+            connection.execute(
+                sa.select(
+                    job_sources_read_model.c.opportunity_id,
+                    job_sources_read_model.c.source_type,
+                )
+            )
+            .mappings()
+            .one()
+        )
+
+    assert opportunity["opportunity_id"] == source["opportunity_id"]
+    assert opportunity["company_name"] == "Acme Example"
+    assert opportunity["job_title_original"] == "Backend Engineer"
+    assert opportunity["user_status"] == "new"
+    assert opportunity["notes"] is None
+    assert source["source_type"] == "greenhouse"
+
+
 def test_retry_after_lost_response_does_not_duplicate_a_row(engine: Engine) -> None:
     stage(engine, run_id="run_1", records=[record()])
     sheet = FakeSheet()
@@ -318,6 +364,58 @@ def test_duplicate_stable_ids_in_the_sheet_block_the_projection(engine: Engine) 
     opportunity_outbox = [row for row in outbox(engine) if row["entity_type"] == "opportunity"]
     assert opportunity_outbox[0]["status"] == "blocked"
     assert opportunity_outbox[0]["last_error_code"] == "duplicate_identity"
+
+
+def test_a_job_source_is_blocked_when_its_parent_opportunity_is_absent(
+    engine: Engine,
+) -> None:
+    stage(engine, run_id="run_1", records=[record()])
+    with engine.begin() as connection:
+        connection.execute(sync_outbox.delete().where(sync_outbox.c.entity_type == "opportunity"))
+    sheet = FakeSheet()
+    sync, _ = dispatcher(engine, sheet)
+
+    outcome = sync.dispatch_due()
+
+    assert outcome.blocked == 1
+    source_outbox = next(row for row in outbox(engine) if row["entity_type"] == "job_source")
+    assert source_outbox["status"] == "blocked"
+    assert source_outbox["last_error_code"] == "missing_parent_opportunity"
+    # Only the header row exists; no orphan source row reached canonical Sheets.
+    assert len(sheet.rows("Job_Sources")) == 1
+
+
+def test_a_read_model_settlement_failure_is_retried_without_a_partial_write(
+    engine: Engine,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    stage(engine, run_id="run_1", records=[record()])
+    sync, _ = dispatcher(engine, FakeSheet())
+
+    def fail_settlement(claim, *, synced_at, read_model):
+        raise ReadModelSettlementError("the read-model update was rolled back")
+
+    monkeypatch.setattr(sync._repository, "settle_synced", fail_settlement)
+
+    outcome = sync.dispatch_due()
+
+    assert outcome.synced == 0
+    assert outcome.failed == 2
+    assert {row["status"] for row in outbox(engine)} == {"retry_wait"}
+    assert {row["last_error_code"] for row in outbox(engine)} == {"read_model_settlement_failed"}
+    with engine.connect() as connection:
+        assert (
+            connection.execute(
+                sa.select(sa.func.count()).select_from(opportunities_read_model)
+            ).scalar_one()
+            == 0
+        )
+        assert (
+            connection.execute(
+                sa.select(sa.func.count()).select_from(job_sources_read_model)
+            ).scalar_one()
+            == 0
+        )
 
 
 def test_transient_error_schedules_a_retry_with_backoff(engine: Engine) -> None:
@@ -570,11 +668,17 @@ def test_reordered_header_blocks_instead_of_writing_to_wrong_columns(
 
     outcome = sync.dispatch_due()
 
-    assert outcome.blocked == 1
+    # The source cannot be confirmed against an unreadable parent tab, so both
+    # claims block instead of publishing an orphan source row.
+    assert outcome.blocked == 2
     opportunity_row = next(row for row in outbox(engine) if row["entity_type"] == "opportunity")
     assert opportunity_row["status"] == "blocked"
     assert opportunity_row["last_error_code"] == "schema_mismatch"
+    source_row = next(row for row in outbox(engine) if row["entity_type"] == "job_source")
+    assert source_row["status"] == "blocked"
+    assert source_row["last_error_code"] == "schema_mismatch"
     assert len(sheet.rows("Opportunities")) == 1
+    assert len(sheet.rows("Job_Sources")) == 1
 
 
 def test_a_second_overlapping_dispatch_is_refused(engine: Engine) -> None:
@@ -695,6 +799,51 @@ def test_excluded_opportunity_is_written_as_a_non_destructive_withdrawal(
     status_index = OPPORTUNITY_HEADERS.index("location_status")
     assert sheet.rows("Opportunities")[1][status_index] == "excluded"
     assert sheet.rows("Opportunities")[1][user_status_index] == "saved"
+
+
+def test_a_withdrawal_of_a_never_written_source_still_settles(
+    engine: Engine,
+) -> None:
+    """Nothing reached the sheet, so there is no orphan risk and nothing to write."""
+
+    with engine.begin() as connection:
+        connection.execute(
+            sync_outbox.insert().values(
+                outbox_id="outbox_ghost",
+                run_id="run_1",
+                destination="google_sheets",
+                entity_type="job_source",
+                entity_id="src_ghost",
+                operation="withdraw",
+                payload_json=json.dumps(
+                    {
+                        "source_id": "src_ghost",
+                        "opportunity_id": "opp_ghost",
+                        "source_type": "greenhouse",
+                        "observation_status": "seen",
+                    }
+                ),
+                payload_hash="hash_ghost",
+                status="pending",
+                attempt_count=0,
+                max_attempts=5,
+                next_attempt_at_utc=None,
+                last_error_code=None,
+                last_error_at_utc=None,
+                created_at_utc="2026-11-15T04:00:00.000000Z",
+                updated_at_utc="2026-11-15T04:00:00.000000Z",
+                synced_at_utc=None,
+            )
+        )
+    sheet = FakeSheet()
+    sync, _ = dispatcher(engine, sheet)
+
+    outcome = sync.dispatch_due()
+
+    assert outcome.synced == 1
+    assert outcome.blocked == 0
+    assert outbox(engine)[0]["status"] == "synced"
+    assert len(sheet.rows("Job_Sources")) == 1
 
 
 def test_recovery_then_dispatch_reconciles_instead_of_duplicating(engine: Engine) -> None:

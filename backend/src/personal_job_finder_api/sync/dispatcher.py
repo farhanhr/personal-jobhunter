@@ -17,7 +17,6 @@ from __future__ import annotations
 
 import json
 import logging
-import threading
 from collections.abc import Callable, Iterator, Mapping, Sequence
 from contextlib import contextmanager
 from dataclasses import asdict, dataclass
@@ -48,10 +47,20 @@ from personal_job_finder_api.repositories.opportunities import (
     OUTBOX_ENTITY_TYPE_SOURCE,
     OUTBOX_OPERATION_WITHDRAW,
 )
+from personal_job_finder_api.repositories.read_model import (
+    ReadModelChange,
+    ReadModelSettlementError,
+    read_model_change,
+)
 from personal_job_finder_api.repositories.sync_outbox import (
     STALE_IN_PROGRESS_AFTER,
     OutboxClaim,
     OutboxRepository,
+)
+from personal_job_finder_api.sync.coordination import (
+    SheetsOperationBusy,
+    acquire_sheets_io,
+    release_sheets_io,
 )
 from personal_job_finder_api.sync.projections import (
     JOB_SOURCE_TAB,
@@ -87,6 +96,7 @@ PERMANENT_ERROR_CODES = frozenset(
         "projection_failed",
         "unknown_entity_type",
         "withdrawal_unsupported",
+        "missing_parent_opportunity",
         "batch_too_large",
         "invalid_request",
         "malformed_response",
@@ -98,13 +108,13 @@ TAB_HEADERS: Mapping[str, tuple[str, ...]] = {
     JOB_SOURCE_TAB: JOB_SOURCE_HEADERS,
 }
 
-# The supported deployment is one application process. This lock prevents two
-# dispatcher calls inside that process from interleaving their read/write steps.
-# Cross-process exclusion for *outbox rows* comes from SQLite's claim transaction,
-# but spreadsheet row positions are not transactional, so two independent processes
-# syncing at once are not supported. The post-write verification read turns that
-# unsupported case into a visible retry instead of a silent overwrite.
-_DISPATCH_LOCK = threading.Lock()
+# The supported deployment is one application process. Dispatch and refresh share
+# one lock so a refresh cannot publish a snapshot read in the middle of a write
+# batch. Cross-process exclusion for *outbox rows* comes from SQLite's claim
+# transaction, but spreadsheet row positions are not transactional, so two
+# independent processes syncing at once are not supported. The post-write
+# verification read turns that unsupported case into a visible retry instead of a
+# silent overwrite.
 
 
 @dataclass(frozen=True, slots=True)
@@ -131,22 +141,24 @@ class SyncAlreadyRunning(RuntimeError):
 
 @contextmanager
 def dispatch_guard() -> Iterator[None]:
-    """Hold the single-process dispatch lock, or fail immediately.
+    """Hold the shared Sheets I/O lock, or fail immediately.
 
     Callers that must also protect a pre-dispatch shortcut (for example the API
     deciding there is nothing due) should hold this guard themselves and then call
     ``SyncDispatcher.dispatch_due(guard=False)``.
     """
 
-    if not _DISPATCH_LOCK.acquire(blocking=False):
+    try:
+        acquire_sheets_io()
+    except SheetsOperationBusy:
         raise SyncAlreadyRunning(
-            "A sync dispatch is already running in this process. "
+            "A Google Sheets refresh or synchronization is already running. "
             "Wait for it to finish before starting another."
-        )
+        ) from None
     try:
         yield
     finally:
-        _DISPATCH_LOCK.release()
+        release_sheets_io()
 
 
 @dataclass(frozen=True, slots=True)
@@ -180,6 +192,7 @@ class _Settled:
     claim: OutboxClaim
     synced: bool
     error_code: str | None = None
+    error: GoogleSheetsError | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -319,11 +332,56 @@ class SyncDispatcher:
                 continue
             grouped.setdefault(tab, []).append(claim)
 
-        for tab, tab_claims in grouped.items():
-            settled.extend(self._dispatch_tab(tab, tab_claims))
+        opportunity_claims = grouped.pop(OPPORTUNITY_TAB, [])
+        source_claims = grouped.pop(JOB_SOURCE_TAB, [])
+        parent_failures: dict[str, GoogleSheetsError] = {}
+
+        if opportunity_claims:
+            # Opportunities are dispatched first so a source in the same batch
+            # can only be written after its parent is confirmed present.
+            opportunity_settled = self._dispatch_tab(
+                OPPORTUNITY_TAB,
+                opportunity_claims,
+            )
+            settled.extend(opportunity_settled)
+            parent_failures = {
+                item.claim.entity_id: item.error
+                for item in opportunity_settled
+                if not item.synced and item.error is not None
+            }
+
+        if source_claims:
+            # Google Sheets is canonical and has no foreign key, so a source
+            # written before its parent would leave an orphan that blocks the
+            # next canonical refresh. Confirm the parent is really there (after
+            # any write from this batch) before writing the source.
+            try:
+                parent_state = self._read_table(OPPORTUNITY_TAB)
+            except GoogleSheetsError as error:
+                settled.extend(self._settle_failure(claim, error) for claim in source_claims)
+                return settled
+
+            known_opportunities = frozenset(
+                identity for identity, position in parent_state.positions.items() if position > 0
+            )
+            settled.extend(
+                self._dispatch_tab(
+                    JOB_SOURCE_TAB,
+                    source_claims,
+                    known_opportunities=known_opportunities,
+                    parent_failures=parent_failures,
+                )
+            )
         return settled
 
-    def _dispatch_tab(self, tab: str, claims: Sequence[OutboxClaim]) -> list[_Settled]:
+    def _dispatch_tab(
+        self,
+        tab: str,
+        claims: Sequence[OutboxClaim],
+        *,
+        known_opportunities: frozenset[str] | None = None,
+        parent_failures: Mapping[str, GoogleSheetsError] | None = None,
+    ) -> list[_Settled]:
         try:
             state = self._read_table(tab)
         except GoogleSheetsError as error:
@@ -353,6 +411,32 @@ class SyncDispatcher:
                 # nothing to withdraw and inserting a blank row would be wrong.
                 settled.append(self._mark_synced(claim))
                 continue
+
+            if tab == JOB_SOURCE_TAB:
+                parent_id = payload.get("opportunity_id")
+                if not isinstance(parent_id, str) or not parent_id.strip():
+                    settled.append(self._block(claim, error_code="missing_parent_opportunity"))
+                    continue
+                if known_opportunities is None or parent_id not in known_opportunities:
+                    deferred = (parent_failures or {}).get(parent_id)
+                    if deferred is None:
+                        # The parent is genuinely absent from the canonical tab.
+                        settled.append(self._block(claim, error_code="missing_parent_opportunity"))
+                    else:
+                        # The parent failed in this same batch. Defer with the
+                        # same classification instead of writing an orphan.
+                        settled.append(
+                            self._settle_failure(
+                                claim,
+                                GoogleSheetsError(
+                                    deferred.code,
+                                    "The parent opportunity has not been synchronized yet.",
+                                    reconnect_required=deferred.reconnect_required,
+                                    retry_after_seconds=deferred.retry_after_seconds,
+                                ),
+                            )
+                        )
+                    continue
 
             try:
                 projection = (
@@ -396,11 +480,14 @@ class SyncDispatcher:
             remainder = planned[len(written) :]
             return [
                 *settled,
-                *(self._mark_synced(item.claim) for item in written),
+                *(self._mark_synced(item.claim, item.projection) for item in written),
                 *(self._settle_failure(item.claim, error) for item in remainder),
             ]
 
-        return [*settled, *(self._mark_synced(item.claim) for item in written)]
+        return [
+            *settled,
+            *(self._mark_synced(item.claim, item.projection) for item in written),
+        ]
 
     def _read_table(self, tab: str) -> _TableState:
         headers = TAB_HEADERS[tab]
@@ -467,8 +554,44 @@ class SyncDispatcher:
                     "The spreadsheet did not retain the written row.",
                 )
 
-    def _mark_synced(self, claim: OutboxClaim) -> _Settled:
-        if self._repository.mark_synced(claim, synced_at=self._clock()):
+    def _mark_synced(
+        self,
+        claim: OutboxClaim,
+        projection: ProjectedRow | None = None,
+    ) -> _Settled:
+        tab = _tab_for(claim)
+        assert tab is not None
+        if projection is None:
+            # A withdrawal whose remote row is already absent: remove any stale
+            # local copy, because there is nothing left to mirror.
+            change = ReadModelChange(tab=tab, identity=claim.entity_id, values=None)
+        else:
+            change = read_model_change(
+                tab=projection.tab,
+                headers=projection.headers,
+                values=projection.values,
+            )
+
+        try:
+            settled = self._repository.settle_synced(
+                claim,
+                synced_at=self._clock(),
+                read_model=change,
+            )
+        except ReadModelSettlementError:
+            logger.warning(
+                "sync_read_model_settlement_failed",
+                extra={"outbox_id": claim.outbox_id, "entity": claim.entity_type},
+            )
+            return self._settle_failure(
+                claim,
+                GoogleSheetsError(
+                    "read_model_settlement_failed",
+                    "The local read model could not be updated with the verified row.",
+                ),
+            )
+
+        if settled:
             return _Settled(claim=claim, synced=True)
         # The payload changed while this request was in flight, so the newer
         # version must stay pending for the next dispatch.
@@ -485,7 +608,7 @@ class SyncDispatcher:
     ) -> _Settled:
         now = self._clock()
         if error.code in PERMANENT_ERROR_CODES:
-            return self._block(claim, error_code=error.code)
+            return self._block(claim, error_code=error.code, error=error)
 
         delay = _backoff_delay(claim.attempt_count)
         retry_after = getattr(error, "retry_after_seconds", None)
@@ -498,15 +621,21 @@ class SyncDispatcher:
             next_attempt_at=now + timedelta(seconds=delay),
             updated_at=now,
         )
-        return _Settled(claim=claim, synced=False, error_code=error.code)
+        return _Settled(claim=claim, synced=False, error_code=error.code, error=error)
 
-    def _block(self, claim: OutboxClaim, *, error_code: str) -> _Settled:
+    def _block(
+        self,
+        claim: OutboxClaim,
+        *,
+        error_code: str,
+        error: GoogleSheetsError | None = None,
+    ) -> _Settled:
         self._repository.mark_blocked(
             claim,
             error_code=error_code,
             updated_at=self._clock(),
         )
-        return _Settled(claim=claim, synced=False, error_code=error_code)
+        return _Settled(claim=claim, synced=False, error_code=error_code, error=error)
 
     def _remaining(self) -> int:
         with self._engine.connect() as connection:

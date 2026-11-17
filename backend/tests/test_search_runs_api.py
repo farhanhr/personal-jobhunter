@@ -15,6 +15,8 @@ from sqlalchemy import Engine
 from personal_job_finder_api.core.time import format_utc
 from personal_job_finder_api.db.tables import search_runs
 from personal_job_finder_api.domain.search_policy import RunStatus
+from personal_job_finder_api.integrations.google_sheets.config import REQUIRED_TABS
+from personal_job_finder_api.integrations.google_sheets.errors import GoogleSheetsError
 from personal_job_finder_api.main import create_app
 from personal_job_finder_api.search.connectors import SourceRunResult, SourceRunStatus
 from personal_job_finder_api.search.reservation import (
@@ -86,11 +88,41 @@ def _factory(*connectors: StubConnector):
     return lambda _snapshot: list(connectors)
 
 
-def _client(engine: Engine, now: datetime, factory=None) -> TestClient:
+class _RefreshTransport:
+    """A valid, empty canonical spreadsheet for pre-reservation reconciliation."""
+
+    def __init__(self) -> None:
+        self.tabs = {tab: [list(headers)] for tab, headers in REQUIRED_TABS.items()}
+        self.calls: list[str] = []
+
+    def get_spreadsheet(self, spreadsheet_id: str) -> dict:
+        self.calls.append("get_spreadsheet")
+        return {"sheets": [{"properties": {"title": title}} for title in self.tabs]}
+
+    def batch_get_values(self, spreadsheet_id: str, ranges: list[str]) -> dict:
+        self.calls.append("batch_get_values")
+        value_ranges = []
+        for requested in ranges:
+            tab = requested.split("!", 1)[0]
+            rows = self.tabs.get(tab, [])
+            if requested.endswith("!1:1"):
+                rows = rows[:1]
+            value_ranges.append({"values": [list(row) for row in rows]} if rows else {})
+        return {"valueRanges": value_ranges}
+
+
+def _client(
+    engine: Engine,
+    now: datetime,
+    factory=None,
+    transport: _RefreshTransport | None = None,
+) -> TestClient:
     app = create_app(
         engine=engine,
         clock=lambda: now,
         connector_factory=factory or _factory(StubConnector()),
+        sync_transport=transport or _RefreshTransport(),
+        sync_spreadsheet_id="test_spreadsheet_id_1234567890",
     )
     return TestClient(app, base_url="http://127.0.0.1:8000")
 
@@ -194,6 +226,47 @@ def test_start_rejects_when_no_connector_implementation_exists(
     payload = response.json()["error"]
     assert payload["code"] == "search_configuration_invalid"
     assert payload["details"]["blocking_reasons"] == ["no_usable_source"]
+    assert _run_count(engine) == 0
+
+
+def test_start_reads_the_canonical_snapshot_before_acceptance(
+    engine: Engine,
+    seed_config,
+) -> None:
+    seed_config()
+    transport = _RefreshTransport()
+
+    with _client(engine, wib(2026, 11, 12, 7, 0), transport=transport) as client:
+        response = _post(client)
+
+    assert response.status_code == 202
+    assert "get_spreadsheet" in transport.calls
+    assert "batch_get_values" in transport.calls
+
+
+def test_start_rejects_before_reservation_when_sheets_cannot_be_read(
+    engine: Engine,
+    seed_config,
+) -> None:
+    seed_config()
+
+    class FailingTransport(_RefreshTransport):
+        def batch_get_values(self, spreadsheet_id: str, ranges: list[str]) -> dict:
+            raise GoogleSheetsError(
+                "timeout",
+                "provider body must never reach the response or state",
+            )
+
+    with _client(
+        engine,
+        wib(2026, 11, 12, 7, 0),
+        transport=FailingTransport(),
+    ) as client:
+        response = _post(client)
+
+    assert response.status_code == 503
+    assert response.json()["error"]["code"] == "sheets_refresh_unavailable"
+    assert "provider body" not in response.text
     assert _run_count(engine) == 0
 
 
@@ -364,6 +437,7 @@ def test_same_key_different_payload_conflicts(
     service = SearchRunService(
         engine,
         connector_factory=_factory(StubConnector(RunCounter())),
+        reconcile=lambda: None,
         clock=lambda: now,
     )
 
@@ -409,6 +483,7 @@ def test_concurrent_run_creation_accepts_exactly_one(
     service = SearchRunService(
         engine,
         connector_factory=_factory(StubConnector(RunCounter())),
+        reconcile=lambda: None,
         clock=lambda: now,
     )
 

@@ -187,6 +187,12 @@ def project_job_source(
     """Map a source-provenance payload onto ``JOB_SOURCE_HEADERS``."""
 
     identity = _required_identity(payload, "source_id")
+    parent_id = _text(payload.get("opportunity_id"))
+    if not parent_id:
+        raise ProjectionError(
+            "missing_parent_opportunity",
+            "A job source needs the stable identity of its parent opportunity.",
+        )
     source_type = _text(payload.get("source_type"))
     # Only a validated URL may reach the sheet. A payload whose URL failed
     # validation stays blank rather than writing a clickable unsafe scheme.
@@ -194,7 +200,7 @@ def project_job_source(
 
     cells: dict[str, Any] = {
         "source_id": identity,
-        "opportunity_id": _text(payload.get("opportunity_id")),
+        "opportunity_id": parent_id,
         "source_type": source_type,
         "source_url": safe_url,
         "external_source_id": _text(payload.get("external_source_id")),

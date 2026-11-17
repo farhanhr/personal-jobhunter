@@ -150,7 +150,7 @@ def retry_sync(
         raise ApiError(
             409,
             "sync_already_running",
-            "A synchronization dispatch is already running. Wait for it to finish.",
+            "A Google Sheets refresh or synchronization is already running. Wait for it to finish.",
         ) from None
 
     response.headers["Cache-Control"] = "no-store"

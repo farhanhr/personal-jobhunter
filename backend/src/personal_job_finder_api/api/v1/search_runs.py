@@ -12,6 +12,7 @@ from pydantic import BaseModel, ConfigDict
 
 from personal_job_finder_api.api.errors import ApiError
 from personal_job_finder_api.api.security import validate_local_request
+from personal_job_finder_api.api.v1.sheets import refresh_api_error
 from personal_job_finder_api.core.time import ensure_aware_utc
 from personal_job_finder_api.domain.search_policy import (
     BlockingReason,
@@ -24,6 +25,9 @@ from personal_job_finder_api.search.reservation import (
     ReservationRejected,
 )
 from personal_job_finder_api.search.run_service import SearchRunService
+from personal_job_finder_api.sync.coordination import DEFAULT_PRE_RESERVATION_WAIT_SECONDS
+from personal_job_finder_api.sync.refresh import RefreshError, SheetsRefreshService
+from personal_job_finder_api.sync.service import resolve_spreadsheet_id
 
 router = APIRouter(
     tags=["search-runs"],
@@ -67,10 +71,28 @@ class SearchRunStatusResponse(BaseModel):
 
 
 def get_search_run_service(request: Request) -> SearchRunService:
+    state = request.app.state
+
+    def reconcile() -> None:
+        def spreadsheet_id() -> str:
+            return resolve_spreadsheet_id(
+                spreadsheet_id=state.sync_spreadsheet_id,
+                fallback=lambda: state.settings.google_sheets_spreadsheet_id,
+            )
+
+        SheetsRefreshService(
+            state.engine,
+            transport_factory=lambda: state.sync_transport_factory(),
+            spreadsheet_id=spreadsheet_id,
+            clock=state.clock,
+            max_batch_ranges=state.settings.google_sheets_max_batch_ranges,
+        ).refresh(wait_seconds=DEFAULT_PRE_RESERVATION_WAIT_SECONDS)
+
     return SearchRunService(
-        request.app.state.engine,
-        connector_factory=request.app.state.connector_factory,
-        clock=request.app.state.clock,
+        state.engine,
+        connector_factory=state.connector_factory,
+        reconcile=reconcile,
+        clock=state.clock,
     )
 
 
@@ -113,6 +135,10 @@ def start_search_run(
             "The Idempotency-Key was already used with a different request.",
             {"existing_run_id": exc.existing_run_id},
         ) from exc
+    except RefreshError as exc:
+        # P0/12 §4: reconciliation precedes reservation. This response means no
+        # quota was consumed and no run row was created.
+        raise refresh_api_error(exc) from None
     except ReservationRejected as exc:
         _raise_policy_error(exc.decision, request)
 
