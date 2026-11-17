@@ -200,6 +200,7 @@ class _PlannedWrite:
     claim: OutboxClaim
     row_number: int | None
     projection: ProjectedRow
+    parent: ReadModelChange | None = None
 
 
 class SyncDispatcher:
@@ -364,12 +365,18 @@ class SyncDispatcher:
             known_opportunities = frozenset(
                 identity for identity, position in parent_state.positions.items() if position > 0
             )
+            parent_rows = {
+                identity: row
+                for identity, position in parent_state.positions.items()
+                if position > 0 and (row := parent_state.row(position)) is not None
+            }
             settled.extend(
                 self._dispatch_tab(
                     JOB_SOURCE_TAB,
                     source_claims,
                     known_opportunities=known_opportunities,
                     parent_failures=parent_failures,
+                    parent_rows=parent_rows,
                 )
             )
         return settled
@@ -381,6 +388,7 @@ class SyncDispatcher:
         *,
         known_opportunities: frozenset[str] | None = None,
         parent_failures: Mapping[str, GoogleSheetsError] | None = None,
+        parent_rows: Mapping[str, Sequence[str]] | None = None,
     ) -> list[_Settled]:
         try:
             state = self._read_table(tab)
@@ -412,6 +420,7 @@ class SyncDispatcher:
                 settled.append(self._mark_synced(claim))
                 continue
 
+            parent_change: ReadModelChange | None = None
             if tab == JOB_SOURCE_TAB:
                 parent_id = payload.get("opportunity_id")
                 if not isinstance(parent_id, str) or not parent_id.strip():
@@ -437,6 +446,11 @@ class SyncDispatcher:
                             )
                         )
                     continue
+                parent_change = _canonical_change(
+                    tab=OPPORTUNITY_TAB,
+                    headers=OPPORTUNITY_HEADERS,
+                    row=(parent_rows or {}).get(parent_id, ()),
+                )
 
             try:
                 projection = (
@@ -464,6 +478,7 @@ class SyncDispatcher:
                     claim=claim,
                     row_number=row_number,
                     projection=projection,
+                    parent=parent_change,
                 )
             )
         if not planned:
@@ -480,13 +495,13 @@ class SyncDispatcher:
             remainder = planned[len(written) :]
             return [
                 *settled,
-                *(self._mark_synced(item.claim, item.projection) for item in written),
+                *(self._mark_synced(item.claim, item.projection, item.parent) for item in written),
                 *(self._settle_failure(item.claim, error) for item in remainder),
             ]
 
         return [
             *settled,
-            *(self._mark_synced(item.claim, item.projection) for item in written),
+            *(self._mark_synced(item.claim, item.projection, item.parent) for item in written),
         ]
 
     def _read_table(self, tab: str) -> _TableState:
@@ -558,6 +573,7 @@ class SyncDispatcher:
         self,
         claim: OutboxClaim,
         projection: ProjectedRow | None = None,
+        parent: ReadModelChange | None = None,
     ) -> _Settled:
         tab = _tab_for(claim)
         assert tab is not None
@@ -577,6 +593,7 @@ class SyncDispatcher:
                 claim,
                 synced_at=self._clock(),
                 read_model=change,
+                parents=(parent,) if parent is not None else (),
             )
         except ReadModelSettlementError:
             logger.warning(
@@ -683,6 +700,25 @@ def _payload_of(claim: OutboxClaim) -> dict[str, Any]:
 def _backoff_delay(attempt_count: int) -> int:
     exponent = max(0, min(attempt_count - 1, 10))
     return min(BACKOFF_BASE_SECONDS * (2**exponent), BACKOFF_CAP_SECONDS)
+
+
+def _canonical_change(
+    *,
+    tab: str,
+    headers: Sequence[str],
+    row: Sequence[str],
+) -> ReadModelChange | None:
+    """Build a read-model change from a canonical row already read from Sheets.
+
+    Used only to mirror a parent row that the local cache is missing. Google omits
+    trailing empty cells, so the row is padded to the canonical width first.
+    """
+
+    if not row:
+        return None
+    cells = list(row[: len(headers)])
+    cells.extend([""] * (len(headers) - len(cells)))
+    return read_model_change(tab=tab, headers=headers, values=cells)
 
 
 __all__ = [

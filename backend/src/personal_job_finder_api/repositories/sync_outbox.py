@@ -7,6 +7,7 @@ status, so a stale response can never mark superseded work as synchronized.
 
 from __future__ import annotations
 
+from collections.abc import Sequence
 from dataclasses import dataclass
 from datetime import datetime, timedelta
 
@@ -24,6 +25,7 @@ from personal_job_finder_api.repositories.read_model import (
     ReadModelChange,
     ReadModelSettlementError,
     apply_read_model_change,
+    read_model_row_exists,
 )
 
 OUTBOX_PENDING = "pending"
@@ -166,6 +168,7 @@ class OutboxRepository:
         *,
         synced_at: datetime,
         read_model: ReadModelChange,
+        parents: Sequence[ReadModelChange] = (),
     ) -> bool:
         """Fence the outbox row and apply the read-model change atomically.
 
@@ -173,6 +176,12 @@ class OutboxRepository:
         the verified projection applied to the read model, and both commit or roll
         back together. A superseded claim therefore never touches the read model
         and leaves the newer payload pending for the next dispatch.
+
+        ``parents`` carries canonical parent rows that may be missing from the
+        local cache. Sheets is canonical, so a verified child write can be valid
+        while the read model is still empty (cold start before the first
+        refresh). A missing parent is mirrored in the same transaction so the
+        foreign key holds; an existing local parent is never overwritten here.
         """
 
         synced_iso = format_utc(synced_at)
@@ -191,6 +200,13 @@ class OutboxRepository:
                 )
                 if result.rowcount != 1:
                     return False
+                for parent in parents:
+                    if not read_model_row_exists(
+                        connection,
+                        tab=parent.tab,
+                        identity=parent.identity,
+                    ):
+                        apply_read_model_change(connection, parent)
                 apply_read_model_change(connection, read_model)
                 return True
         except SQLAlchemyError as error:

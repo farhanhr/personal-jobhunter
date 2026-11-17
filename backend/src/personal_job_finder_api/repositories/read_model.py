@@ -178,6 +178,18 @@ def apply_read_model_change(connection: Any, change: ReadModelChange) -> None:
     connection.execute(update(table).where(column == change.identity).values(**dict(change.values)))
 
 
+def read_model_row_exists(connection: Any, *, tab: str, identity: str) -> bool:
+    """Report whether one read-model row is already cached."""
+
+    table = _READ_MODEL_TABLES.get(tab)
+    identity_column = _IDENTITY_COLUMNS.get(tab)
+    if table is None or identity_column is None:
+        raise ValueError("Unknown read-model tab.")
+
+    column = table.c[identity_column]
+    return connection.execute(select(column).where(column == identity)).first() is not None
+
+
 class ReadModelRepository:
     """Read and write the local projection of the canonical Sheets tabs."""
 

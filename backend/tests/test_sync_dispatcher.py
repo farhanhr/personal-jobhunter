@@ -38,6 +38,7 @@ from personal_job_finder_api.integrations.google_sheets.errors import GoogleShee
 from personal_job_finder_api.repositories.read_model import ReadModelSettlementError
 from personal_job_finder_api.search.staging import OpportunityStagingService
 from personal_job_finder_api.sync.dispatcher import SyncDispatcher, SyncOutcome
+from personal_job_finder_api.sync.projections import project_opportunity
 
 NOW = datetime(2026, 11, 15, 5, 0, tzinfo=UTC)
 ROLE = TargetRoleSpec(
@@ -392,7 +393,7 @@ def test_a_read_model_settlement_failure_is_retried_without_a_partial_write(
     stage(engine, run_id="run_1", records=[record()])
     sync, _ = dispatcher(engine, FakeSheet())
 
-    def fail_settlement(claim, *, synced_at, read_model):
+    def fail_settlement(claim, *, synced_at, read_model, parents=()):
         raise ReadModelSettlementError("the read-model update was rolled back")
 
     monkeypatch.setattr(sync._repository, "settle_synced", fail_settlement)
@@ -844,6 +845,82 @@ def test_a_withdrawal_of_a_never_written_source_still_settles(
     assert outcome.blocked == 0
     assert outbox(engine)[0]["status"] == "synced"
     assert len(sheet.rows("Job_Sources")) == 1
+
+
+def test_a_source_settles_when_its_parent_exists_only_in_the_sheet(
+    engine: Engine,
+) -> None:
+    """Cold start: the parent is canonical in Sheets but absent from SQLite.
+
+    The read model is a rebuildable cache and can be empty before the first
+    refresh, while the spreadsheet already holds earlier rows. A verified source
+    write must then still settle instead of failing the foreign key on every
+    retry.
+    """
+
+    parent = project_opportunity(
+        {
+            "opportunity_id": "opp_cold",
+            "company_name": "Acme Example",
+            "job_title": "Backend Engineer",
+            "role_match_type": "canonical_title",
+            "location_status": "eligible",
+            "work_mode": "onsite",
+            "remote_scope": "not_applicable",
+            "availability_status": "unknown",
+            "user_status": "new",
+        }
+    )
+    sheet = FakeSheet()
+    sheet.rows("Opportunities").append(list(parent.values))
+    with engine.begin() as connection:
+        connection.execute(
+            sync_outbox.insert().values(
+                outbox_id="outbox_cold_source",
+                run_id="run_1",
+                destination="google_sheets",
+                entity_type="job_source",
+                entity_id="src_cold",
+                operation="upsert",
+                payload_json=json.dumps(
+                    {
+                        "source_id": "src_cold",
+                        "opportunity_id": "opp_cold",
+                        "source_type": "greenhouse",
+                        "safe_source_url": "https://boards.greenhouse.io/acme/jobs/1001",
+                        "external_source_id": "1001",
+                        "captured_at_utc": "2026-11-15T05:00:00.000000Z",
+                        "observation_status": "seen",
+                    }
+                ),
+                payload_hash="hash_cold",
+                status="pending",
+                attempt_count=0,
+                max_attempts=5,
+                next_attempt_at_utc=None,
+                last_error_code=None,
+                last_error_at_utc=None,
+                created_at_utc="2026-11-15T04:00:00.000000Z",
+                updated_at_utc="2026-11-15T04:00:00.000000Z",
+                synced_at_utc=None,
+            )
+        )
+    sync, _ = dispatcher(engine, sheet)
+
+    outcome = sync.dispatch_due()
+
+    assert outcome.synced == 1
+    assert outcome.blocked == 0
+    assert outbox(engine)[0]["status"] == "synced"
+    with engine.connect() as connection:
+        assert (
+            connection.execute(sa.select(opportunities_read_model.c.opportunity_id)).scalar_one()
+            == "opp_cold"
+        )
+        assert (
+            connection.execute(sa.select(job_sources_read_model.c.opportunity_id)).scalar_one()
+            == "opp_cold"
+        )
 
 
 def test_recovery_then_dispatch_reconciles_instead_of_duplicating(engine: Engine) -> None:
