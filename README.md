@@ -1,369 +1,85 @@
-# Personal Job Hunter
+# Personal Job Finder
 
-A single-user, local-first job discovery and organization application for Indonesia.
-It helps one person find relevant opportunities from curated official company sources
-and user-provided LinkedIn hiring posts. It does **not** apply for jobs, message
-recruiters, or automate LinkedIn.
+A personal job discovery app for Indonesia that runs entirely on your own computer.
+It collects relevant job openings from company career pages you approve, keeps them in
+one place, and lets you review them in a simple local dashboard. You stay in control:
+it never applies to a job, never messages anyone, and never touches your LinkedIn
+account.
 
-**Current status:** Core search, durable opportunity staging, local read APIs, the
-Google Sheets authentication/preflight foundation, a durable outbox dispatcher, and the
-manual Sync API are implemented. The `Run_History` projection and a dedicated job-feed
-screen are still pending.
+## Who this is for
 
-## Product boundaries
+Someone job-hunting in Indonesia who is tired of checking many company career pages by
+hand, but who does **not** want another account, cloud service, or automated bot acting
+on their behalf.
 
-- One to three primary target roles; zero roles is invalid for Auto Search.
-- At least one enabled, explicitly permitted company source is required; unreviewed or
-  blocked sources do not qualify.
-- Indonesia-only location scope, with an explicit remote policy and a review queue for
-  unknown locations.
-- Auto Search is manual and user-triggered only.
-- Maximum two accepted runs per operational day; 12-hour cooldown; 06:00
-  `Asia/Jakarta` reset; one active run.
-- Google Sheets is the intended canonical user-facing record store; SQLite owns
-  operational state, durable staging, and pending sync work. Synchronization is manual
-  and never starts on its own.
-- No background scheduler, auto-apply, recruiter messaging, or LinkedIn browser
-  automation.
+This is a single-person tool. It is not a multi-user product, a hosted service, or a
+recruitment platform.
 
-## Implemented so far
+## What it does
 
-- **Search policy engine** — enforces the two-run operational-day limit, 12-hour
-  cooldown, 06:00 `Asia/Jakarta` reset, and single-active-run lock in the backend with
-  atomic SQLite transactions.
-- **Target role management** — stores one to three primary roles and their explicit
-  aliases in local SQLite.
-- **Company source registry** — registers permitted company career sources, records
-  review and approval state, and enables or disables a source.
-- **Manual search runs** — starts only from an explicit user request, requires an
-  idempotency key, and exposes lifecycle status and per-source results.
-- **Greenhouse connector** — reads public, unauthenticated Greenhouse job boards with
-  bounded timeout and response size. It does not submit applications or use browser
-  automation.
-- **Durable opportunity staging** — normalizes connector records, preserves source
-  provenance and run references, and commits opportunities plus pending-sync outbox
-  entries in one SQLite transaction before the run reaches a terminal state. A run with
-  unsynced work reports `completed_pending_sync`.
-- **Job feed and review API** — serves a paginated main feed and review queue at
-  `GET /api/v1/jobs`, with stable opportunity identity, source provenance, safe external
-  links, and run association.
-- **Google Sheets foundation** — desktop OAuth with the Sheets-only scope, keyring-first
-  credential storage with a private-file fallback, a bounded official Sheets API v4
-  adapter, and read-only spreadsheet preflight with explicit safe initialization.
-- **Durable outbox dispatcher** — projects staged opportunities and source provenance
-  into `Opportunities` and `Job_Sources` with atomic claiming, payload-hash fencing,
-  idempotent upsert keyed on `opportunity_id` / `source_id`, bounded `RAW` batches,
-  exponential backoff, and restart recovery. It is invoked manually and never runs a
-  connector or consumes search quota.
+- **Searches only what you approve.** You register the company career sources you want
+  to follow and enable them yourself. Sources you have not reviewed are never used.
+- **Stays within a strict daily limit.** At most two searches per operational day, with
+  a 12-hour gap between them. The day resets at 06:00 Jakarta time. Only one search can
+  run at a time.
+- **Starts only when you click.** Every search is a deliberate action in your local
+  dashboard. Nothing runs on a schedule, in the background, or while you are away.
+- **Focuses on your target roles.** You choose one to three primary roles and, if you
+  want, explicit aliases for them. The app does not silently widen your search.
+- **Keeps results in a Google Sheet you own.** New findings are written into your own
+  spreadsheet, where you can sort, annotate, and track applications. The app also keeps
+  a local copy so the dashboard stays fast and readable offline.
+- **Shows provenance.** Every opening keeps the source it came from, so you can always
+  check the original posting before deciding anything.
 
-- **Manual Sync API** — `GET /api/v1/sync/status`, `POST /api/v1/sync/retry`, and
-  `POST /api/v1/sync/outbox/{outbox_id}/requeue` expose and drive the dispatcher over
-  loopback, with per-entity counts, blocked-work guidance, and deterministic
-  duplicate-trigger handling.
+## What it never does
 
-The `Run_History` projection, automatic synchronization, and a dedicated job-feed screen
-are **not implemented yet**.
+- It does not apply to jobs, fill in forms, or submit anything.
+- It does not contact recruiters or send messages of any kind.
+- It does not log in to LinkedIn, scrape LinkedIn, or use browser automation against
+  LinkedIn. If you want to keep a hiring post you found yourself, you paste its details
+  in by hand.
+- It does not bypass access controls, rotate identities, or retry aggressively when a
+  site asks it to slow down.
+- It does not upload your data anywhere except the Google Sheet you connect yourself.
+- It does not send analytics, telemetry, or usage reports.
 
-## API surface
+## How it works
 
-All endpoints are local and bound to loopback. Responses that expose mutable state use
-`Cache-Control: no-store`.
+Everything runs locally. A small backend does the searching and bookkeeping, and a local
+web interface is where you configure and review. Both listen only on your own machine
+(`127.0.0.1`), so nothing is reachable from the internet or your local network.
 
-| Method | Path | Purpose |
-|---|---|---|
-| `GET` | `/api/v1/health` | Liveness and version |
-| `GET` | `/api/v1/search-policy` | Quota, cooldown, active-run, and eligibility state |
-| `GET` | `/api/v1/settings/search` | Read target roles |
-| `PUT` | `/api/v1/settings/search` | Replace target roles atomically |
-| `GET` | `/api/v1/companies` | List registered company sources |
-| `POST` | `/api/v1/companies` | Register a company source |
-| `PATCH` | `/api/v1/companies/{company_id}` | Update policy state or enablement |
-| `POST` | `/api/v1/search-runs` | Start one manual search run; requires `Idempotency-Key` |
-| `GET` | `/api/v1/search-runs/{run_id}` | Read run status and sanitized source results |
-| `GET` | `/api/v1/jobs` | Paginated main feed or review queue (`feed=main` or `review`) |
-| `GET` | `/api/v1/sync/status` | Outbox counts by state and entity type; blocked work needing action |
-| `POST` | `/api/v1/sync/retry` | Dispatch due `pending`/`retry_wait` projections once |
-| `POST` | `/api/v1/sync/outbox/{outbox_id}/requeue` | Re-enable one `blocked` projection |
+Two kinds of storage are used, with different jobs:
 
-Example feed request:
-
-```bash
-curl "http://127.0.0.1:8000/api/v1/jobs?feed=main&page=1&page_size=25"
-```
-
-## Stack
-
-| Layer | Technology |
+| Storage | What it holds |
 |---|---|
-| Backend | Python 3.12, uv, FastAPI, Uvicorn, Pydantic, SQLAlchemy Core, Alembic, pytest, HTTPX, Ruff |
-| Frontend | React, TypeScript, Vite, npm, Vitest, Testing Library |
-| Network | Loopback only (`127.0.0.1`) |
+| Your Google Sheet | The record you actually own and read: opportunities, their sources, and search history |
+| A local database on your computer | Private settings, search limits, pending synchronization work, and a fast local copy of your sheet |
 
+Your spreadsheet is the source of truth. The local copy can always be rebuilt from it.
 
-## Prerequisites
+## What you need
 
-- Python 3.12
-- [uv](https://docs.astral.sh/uv/)
-- Node.js 20.19+ or 22.12+ and npm (Vite 8 requirement)
-- No Docker, Redis, Celery, or Kubernetes is required.
+- A computer running Linux, macOS, or Windows with Python 3.12 and
+  [uv](https://docs.astral.sh/uv/) installed.
+- Node.js 20.19+ (or 22.12+) and npm, to run the local interface.
+- A Google account, if you want results written to a spreadsheet. This part is optional
+  until you decide to connect it.
 
-## Backend — install and run
+No Docker, database server, cloud account, or paid service is required.
+
+## Getting started
+
+### 1. Start the app
 
 ```bash
 cd backend
 uv sync
-uv run uvicorn personal_job_finder_api.main:app \
-  --host 127.0.0.1 --port 8000 --reload
+uv run uvicorn personal_job_finder_api.main:app --host 127.0.0.1 --port 8000
 ```
 
-Alternative (without the reload watcher):
-
-```bash
-cd backend
-uv run python -m personal_job_finder_api.main
-```
-
-Backend URL: <http://127.0.0.1:8000>
-
-On startup the backend creates the local data directory, applies pending Alembic
-migrations, and marks stale `accepted`/`running` runs as `interrupted`. No search is
-resumed automatically.
-
-Health check:
-
-```bash
-curl http://127.0.0.1:8000/api/v1/health
-```
-
-Expected:
-
-```json
-{
-  "status": "ok",
-  "service": "personal-job-finder-api",
-  "version": "0.1.0"
-}
-```
-
-Search-policy status:
-
-```bash
-curl http://127.0.0.1:8000/api/v1/search-policy
-```
-
-It reports the operational day, accepted and remaining runs, cooldown, next eligible
-time, active-run state, and stable blocking reasons.
-
-Starting a run requires an explicit user action and a unique idempotency key:
-
-```bash
-curl -X POST http://127.0.0.1:8000/api/v1/search-runs \
-  -H 'Content-Type: application/json' \
-  -H 'Idempotency-Key: 11111111-1111-4111-8111-111111111111' \
-  -d '{}'
-```
-
-The backend re-checks quota, cooldown, target roles, and usable sources inside one
-SQLite transaction before accepting the run. Reusing a key with a different request
-body is rejected.
-
-## Local data and migrations
-
-The SQLite operational database defaults to:
-
-```text
-~/.local/share/personal-job-finder/personal-job-finder.sqlite3
-```
-
-Override the directory for development or tests with `PJF_DATA_DIR`. The database is
-private local state and must never be committed.
-
-Apply or inspect migrations from `backend/`:
-
-```bash
-cd backend
-uv run alembic upgrade head
-uv run alembic current
-```
-
-## Google Sheets setup
-
-The repository does not contain Google OAuth client credentials or user tokens. The
-foundation is optional until the sync dispatcher lands, but these steps prepare the
-local connection.
-
-1. In Google Cloud Console, enable the **Google Sheets API**.
-2. Configure an OAuth consent screen. For personal use, **External** with publishing
-   status **Testing** is sufficient while you are the only test user.
-3. Create an OAuth client of type **Desktop app**, then download its JSON file.
-4. Store the JSON outside Git, for example:
-
-   ```text
-   ~/.local/share/personal-job-finder/credentials/google-oauth-client.json
-   ```
-
-   Override the location with `GOOGLE_OAUTH_CLIENT_FILE`.
-5. Create or choose a spreadsheet and set its ID from the spreadsheet URL:
-
-   ```bash
-   export GOOGLE_SHEETS_SPREADSHEET_ID='<spreadsheet-id>'
-   ```
-
-6. From `backend/`, authorize the account through your system browser:
-
-   ```bash
-   uv run python -m personal_job_finder_api.integrations.google_sheets.cli auth
-   ```
-
-   The browser returns through an ephemeral loopback callback on `127.0.0.1`. Only the
-   `https://www.googleapis.com/auth/spreadsheets` scope is requested.
-
-7. Run the read-only preflight:
-
-   ```bash
-   uv run python -m personal_job_finder_api.integrations.google_sheets.cli check
-   ```
-
-8. If preflight reports missing tabs or empty header rows, explicitly initialize them:
-
-   ```bash
-   uv run python -m personal_job_finder_api.integrations.google_sheets.cli init
-   ```
-
-   Initialization only creates missing tabs and empty header rows. It refuses to
-   overwrite a non-empty header that does not match the accepted schema.
-
-Credentials are stored in the OS keyring through `keyring`. If no keyring backend is
-available, the application falls back to a private file at
-`~/.local/share/personal-job-finder/credentials/google-token.json` with mode `0600`
-and a `0700` directory. Tokens are never written to SQLite, outbox payloads, logs, or
-the repository.
-
-To disconnect the account and remove the stored credential:
-
-```bash
-cd backend
-uv run python -m personal_job_finder_api.integrations.google_sheets.cli disconnect
-```
-
-Revoking access from the Google account page also works; the next command then reports
-`reconnect_required` and the unusable credential is discarded automatically.
-
-### Manual synchronization
-
-Synchronization is explicit and process-local. It never runs a connector, never consumes
-search quota, and never starts automatically. It is available both as a local command and
-as the local API below.
-
-```bash
-cd backend
-uv run python -m personal_job_finder_api.integrations.google_sheets.cli sync
-```
-
-Via the API:
-
-```bash
-curl http://127.0.0.1:8000/api/v1/sync/status
-
-curl -X POST http://127.0.0.1:8000/api/v1/sync/retry \
-  -H 'Origin: http://127.0.0.1:5173'
-```
-
-`POST /api/v1/sync/retry` runs one dispatch synchronously in the request, so the response
-reports the real outcome rather than an optimistic acceptance. It first returns abandoned
-`in_progress` work to the retry queue, then dispatches. When nothing is due it makes no
-Google request at all. A second request while a dispatch is running receives
-`409 sync_already_running` instead of starting another worker; this is a single-process
-guarantee, not a distributed lock.
-
-`GET /api/v1/sync/status` reads only local SQLite state, so it works even when the Google
-credential or spreadsheet configuration is broken. It reports counts per state for both
-`opportunity` and `job_source` projections, how many are due now, whether user action is
-required, and a capped list of blocked projections with their sanitized error code. It
-never returns payloads, tokens, spreadsheet IDs, or file paths.
-
-`POST /api/v1/sync/outbox/{outbox_id}/requeue` re-enables exactly one blocked projection
-after its cause is fixed. There is no bulk retry: silently clearing every blocked error
-could resend work whose cause was never resolved. Unknown ids return `404`; a projection
-that is not blocked returns `409`.
-
-State-changing routes require an allowed `Origin` header, and all sync responses are
-`Cache-Control: no-store`.
-
-The command line remains equivalent:
-
-```bash
-uv run python -m personal_job_finder_api.integrations.google_sheets.cli sync
-uv run python -m personal_job_finder_api.integrations.google_sheets.cli recover
-uv run python -m personal_job_finder_api.integrations.google_sheets.cli requeue \
-  --outbox-id outbox_opp_<id>
-```
-
-Behavior worth knowing:
-
-- Rows are matched on `opportunity_id` and `source_id`. A retry after a lost response
-  updates the existing row instead of appending a duplicate.
-- `user_status` is user-owned. An update carries the value currently in the sheet, and a
-  brand-new row starts at the contract default `new`.
-- Transient failures (timeout, network, 429, 5xx) become `retry_wait` with capped
-  exponential backoff; a bounded `Retry-After` hint is honored. Invalid credentials,
-  permission errors, a missing spreadsheet, or a header mismatch become `blocked`.
-- `recover` returns work abandoned by a crashed run to the retry queue without ever
-  marking it synchronized. It only touches SQLite, so it works even when the stored
-  Google credential is the problem:
-
-  ```bash
-  uv run python -m personal_job_finder_api.integrations.google_sheets.cli recover
-  ```
-
-- Every write is re-read before it is settled. `batchUpdate` is not transactional, so a
-  partial failure can apply some rows; re-reading means a second attempt finds the row by
-  identity instead of appending a duplicate.
-
-- The accepted contract defines no delete or tombstone semantics, and deleting a row
-  would destroy a `user_status` the user set. So when a record leaves the feed:
-  - a projection that provably never left this machine is withdrawn locally;
-  - a projection that may already be in the sheet is rewritten with
-    `location_status = excluded`, keeping `user_status` intact;
-  - `Job_Sources` rows are provenance and are left in place.
-
-  Only a location-based exclusion has a contract-valid way to say "not in the feed".
-  If a record were excluded for another reason, the projection is `blocked` with
-  `withdrawal_unsupported` rather than being given a misleading status.
-
-Blocked work is never retried automatically. After fixing the cause, re-enable it:
-
-```bash
-uv run python -m personal_job_finder_api.integrations.google_sheets.cli requeue \
-  --outbox-id outbox_opp_<id>
-```
-
-Manual sorting of the spreadsheet is supported because identities are re-read on every
-dispatch. Do not repurpose the reserved identity columns (`opportunity_id`, `source_id`);
-they are the only upsert key. Two independent processes syncing to the same spreadsheet at
-the same time are not supported, because row positions are not transactional.
-
-External OAuth applications in **Testing** status can receive refresh tokens that expire
-after seven days. A weekly reconnect may therefore be necessary until the app is
-published or exempted; this is expected Google behavior, not a Sheets integration bug.
-
-| Variable | Default | Purpose |
-|---|---|---|
-| `GOOGLE_SHEETS_SPREADSHEET_ID` | unset | Spreadsheet used by the sync foundation |
-| `GOOGLE_OAUTH_CLIENT_FILE` | `<data-dir>/credentials/google-oauth-client.json` | Desktop OAuth client JSON |
-| `GOOGLE_TOKEN_FILE` | `<data-dir>/credentials/google-token.json` | Keyring fallback token file |
-| `GOOGLE_SHEETS_TIMEOUT_SECONDS` | `10` | Bounded Sheets request timeout |
-| `GOOGLE_SHEETS_MAX_BATCH_RANGES` | `100` | Maximum ranges per value batch |
-| `GOOGLE_SHEETS_BATCH_SIZE` | `25` | Maximum rows written per batch |
-| `GOOGLE_OAUTH_TIMEOUT_SECONDS` | `300` | Loopback callback wait |
-| `GOOGLE_KEYRING_SERVICE_NAME` | `personal-job-finder` | Keyring service label |
-
-All values are local configuration. Never commit the client JSON, token file, or
-spreadsheet ID.
-
-## Frontend — install and run
-
-Run the backend first, then:
+Then, in a second terminal:
 
 ```bash
 cd frontend
@@ -371,44 +87,111 @@ npm install
 npm run dev
 ```
 
-Frontend URL: <http://127.0.0.1:5173>
+Open <http://127.0.0.1:5173>. Your data stays on this machine.
 
-Vite binds to `127.0.0.1:5173`, uses a strict port, and proxies `/api` to
-`http://127.0.0.1:8000`. The dashboard fetches the real health endpoint, manages target
-roles and company sources, shows current search eligibility, and can start one manual
-run and poll its status. It never assumes the backend is healthy.
+### 2. Describe what you are looking for
 
-## Tests and checks
+In the dashboard, add one to three target roles and register the company career sources
+you want to follow. A source must be explicitly reviewed and enabled before it can be
+used. You can disable a source at any time.
 
-The test suite is fully offline: it uses sanitized fixtures and mocked HTTP responses.
-Running it does not contact live job boards, Google Sheets, or LinkedIn.
+### 3. Connect your Google Sheet (optional but recommended)
 
-Backend:
+The app never asks for your Google password. It uses Google's own sign-in page in your
+browser, and the resulting token is kept in your operating system's credential store.
 
-```bash
-cd backend
-uv run pytest
-uv run ruff check .
-uv run ruff format --check .
-```
+1. In Google Cloud Console, enable the **Google Sheets API**.
+2. Configure an OAuth consent screen. For personal use, **External** with publishing
+   status **Testing** is enough while you are the only test user.
+3. Create an OAuth client of type **Desktop app** and download its JSON file.
+4. Keep that file outside any Git repository, for example at
+   `~/.local/share/personal-job-finder/credentials/google-oauth-client.json`.
+5. Create a spreadsheet, then point the app at it:
 
-Frontend:
+   ```bash
+   export GOOGLE_SHEETS_SPREADSHEET_ID='<your-spreadsheet-id>'
+   ```
 
-```bash
-cd frontend
-npm test
-npm run typecheck
-npm run build
-npm run lint
-```
+6. Authorize the account from `backend/`:
 
-## Continuous integration
+   ```bash
+   uv run python -m personal_job_finder_api.integrations.google_sheets.cli auth
+   ```
 
-`.github/workflows/verify.yml` runs on pushes to `main` and pull requests targeting
-`main`. One Ubuntu job installs Python 3.12 with uv and Node.js 22 with npm, then runs
-backend pytest, Ruff check/format, and the frontend tests, typecheck, lint, and
-production build. The workflow uses no repository secrets and performs no deployment.
+7. Check that the spreadsheet matches the expected layout:
+
+   ```bash
+   uv run python -m personal_job_finder_api.integrations.google_sheets.cli check
+   ```
+
+   If tabs or header rows are missing, this creates them without overwriting anything
+   you have already written:
+
+   ```bash
+   uv run python -m personal_job_finder_api.integrations.google_sheets.cli init
+   ```
+
+8. Copy new results into your sheet whenever you want:
+
+   ```bash
+   uv run python -m personal_job_finder_api.integrations.google_sheets.cli sync
+   ```
+
+   Or pull your latest sheet edits back into the dashboard:
+
+   ```bash
+   curl -X POST http://127.0.0.1:8000/api/v1/sheets/refresh \
+     -H 'Origin: http://127.0.0.1:5173'
+   ```
+
+To disconnect later, run `... google_sheets.cli disconnect`, or revoke the app's access
+from your Google account page. Your local copy is not affected.
+
+### 4. Run a search
+
+Press the search button in the dashboard. The app checks the daily limit and cooldown,
+then searches every enabled source for your target roles. When it finishes, new findings
+are queued for your sheet and the dashboard shows what was found.
+
+## Your data and privacy
+
+- All settings, limits, and pending work live in
+  `~/.local/share/personal-job-finder/` on your computer.
+- The Google token is stored in your OS credential store. If none is available, it is
+  written to a private file that only your user account can read.
+- Nothing is sent to the project author or any third party. There is no telemetry.
+- Your spreadsheet ID, roles, and search history are yours. They are not part of this
+  project and are never published here.
+- Uninstalling is enough to remove everything, aside from the Google Sheet you created
+  and the app authorization you can revoke in your Google account.
+
+## Good to know
+
+- **Google sign-in may need renewing.** Apps in Google's "Testing" status can expire
+  refresh tokens after seven days. If that happens, run the `auth` command again. This
+  is expected Google behavior, not a bug in this app.
+- **A search is not a guarantee.** A job can close, change, or be filled between the
+  search and your application. Always check the original posting.
+- **Only what you enabled is searched.** If a result seems missing, check that the
+  company source is registered, approved, and enabled.
+- **One app process at a time.** Running two copies against the same spreadsheet at once
+  is not supported.
+
+## Current status
+
+The core is usable today: target roles, company sources, manual searches with the daily
+limit and cooldown, a local job feed, Google Sheets sign-in and synchronization, and
+refreshing your local copy from the sheet.
+
+Still in progress: automatic search history in the sheet, a dedicated job browsing
+screen, editing application-tracking fields from the app, and manual LinkedIn post
+import. Until those land, your spreadsheet remains the place to track applications.
+
+## Reporting a security issue
+
+Please do not open a public issue that contains personal data or credentials. See
+[SECURITY.md](SECURITY.md) for how to report privately.
 
 ## License
 
-MIT. See `LICENSE`.
+MIT. See [LICENSE](LICENSE).
