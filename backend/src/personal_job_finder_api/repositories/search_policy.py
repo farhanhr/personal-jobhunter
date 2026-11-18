@@ -128,6 +128,27 @@ class SearchPolicyRepository:
         )
         return PersistedSearchRun.from_mapping(row) if row is not None else None
 
+    def get_latest_run(self, connection: Connection) -> PersistedSearchRun | None:
+        """Return the most recently accepted run, or None if no runs exist.
+
+        Selection criteria:
+        - Primary: accepted_at_utc descending (most recent first)
+        - Tie-breaker: run_id ascending (deterministic)
+        """
+        row = (
+            connection.execute(
+                select(search_runs)
+                .order_by(
+                    search_runs.c.accepted_at_utc.desc(),
+                    search_runs.c.run_id.asc(),
+                )
+                .limit(1)
+            )
+            .mappings()
+            .one_or_none()
+        )
+        return PersistedSearchRun.from_mapping(row) if row is not None else None
+
     def insert_run(self, connection: Connection, run: PersistedSearchRun) -> None:
         connection.execute(
             search_runs.insert().values(

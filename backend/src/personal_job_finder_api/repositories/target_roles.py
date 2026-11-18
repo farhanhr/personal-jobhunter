@@ -37,12 +37,25 @@ class TargetRoleRecord:
 class TargetRoleRepository:
     """Read and atomically replace the enabled target-role rows."""
 
-    def list_all(self, connection: Connection) -> tuple[StoredTargetRole, ...]:
+    def list_all(
+        self,
+        connection: Connection,
+        *,
+        include_disabled: bool = False,
+    ) -> tuple[StoredTargetRole, ...]:
+        """Return the configured target roles.
+
+        Disabled roles are part of the configuration history: a historical
+        opportunity may still reference one, so a reader that resolves role
+        labels can ask for them with ``include_disabled``.
+        """
+
+        query = select(target_roles)
+        if not include_disabled:
+            query = query.where(target_roles.c.enabled.is_(True))
         rows = (
             connection.execute(
-                select(target_roles)
-                .where(target_roles.c.enabled.is_(True))
-                .order_by(target_roles.c.canonical_name, target_roles.c.role_id)
+                query.order_by(target_roles.c.canonical_name, target_roles.c.role_id)
             )
             .mappings()
             .all()

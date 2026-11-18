@@ -150,6 +150,42 @@ def start_search_run(
 
 
 @router.get(
+    "/search-runs/latest",
+    response_model=SearchRunStatusResponse | None,
+)
+def get_latest_search_run(
+    response: Response,
+    service: Annotated[SearchRunService, Depends(get_search_run_service)],
+) -> SearchRunStatusResponse | None:
+    """Return the most recently accepted search run, or None if no runs exist.
+
+    Selection criteria:
+    - Primary: accepted_at_utc descending (most recent first)
+    - Tie-breaker: run_id ascending (deterministic)
+
+    This endpoint returns the same response structure as /search-runs/{run_id}
+    but automatically selects the latest run without requiring a run_id parameter.
+    """
+    run = service.get_latest_run()
+    response.headers["Cache-Control"] = "no-store"
+
+    if run is None:
+        return None
+
+    return SearchRunStatusResponse(
+        run_id=run.run_id,
+        status=run.status.value,
+        accepted_at_utc=run.accepted_at,
+        started_at_utc=run.started_at,
+        finished_at_utc=run.finished_at,
+        operational_day=run.operational_day,
+        progress=_load_json_object(run.progress_json),
+        source_results=_load_json_list(run.source_summary_json),
+        error_summary=run.error_summary,
+    )
+
+
+@router.get(
     "/search-runs/{run_id}",
     response_model=SearchRunStatusResponse,
 )

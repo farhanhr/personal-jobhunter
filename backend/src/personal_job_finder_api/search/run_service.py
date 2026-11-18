@@ -102,6 +102,16 @@ class SearchRunService:
         with self._engine.connect() as connection, connection.begin():
             return self._repository.get_run(connection, run_id)
 
+    def get_latest_run(self) -> PersistedSearchRun | None:
+        """Return the most recently accepted run, or None if no runs exist.
+
+        Selection criteria:
+        - Primary: accepted_at_utc descending (most recent first)
+        - Tie-breaker: run_id ascending (deterministic)
+        """
+        with self._engine.connect() as connection, connection.begin():
+            return self._repository.get_latest_run(connection)
+
     def execute(self, run_id: str) -> None:
         """Run orchestration without letting an internal failure escape the task."""
 
