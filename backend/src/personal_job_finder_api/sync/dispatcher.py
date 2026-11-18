@@ -67,6 +67,7 @@ from personal_job_finder_api.sync.projections import (
     OPPORTUNITY_TAB,
     ProjectedRow,
     ProjectionError,
+    is_tracker_only_opportunity_payload,
     project_job_source,
     project_opportunity,
 )
@@ -97,6 +98,9 @@ PERMANENT_ERROR_CODES = frozenset(
         "unknown_entity_type",
         "withdrawal_unsupported",
         "missing_parent_opportunity",
+        # A tracker-only payload cannot create a complete canonical row, so a
+        # deleted row is an operator-action-required conflict, not a retry.
+        "canonical_row_missing",
         "batch_too_large",
         "invalid_request",
         "malformed_response",
@@ -418,6 +422,19 @@ class SyncDispatcher:
                 # Nothing reached the spreadsheet for this record, so there is
                 # nothing to withdraw and inserting a blank row would be wrong.
                 settled.append(self._mark_synced(claim))
+                continue
+
+            if (
+                tab == OPPORTUNITY_TAB
+                and row_number is None
+                and is_tracker_only_opportunity_payload(payload)
+            ):
+                # This lookup is a fresh read of the canonical tab, so an absent
+                # row means the record was removed there. A tracker-only payload
+                # carries no discovery columns, so writing it would publish a
+                # blank replacement row. Keep the pending edits and stop until
+                # the user restores the row and requeues.
+                settled.append(self._block(claim, error_code="canonical_row_missing"))
                 continue
 
             parent_change: ReadModelChange | None = None

@@ -1005,3 +1005,228 @@ def test_dispatcher_keeps_local_rows_intact_when_blocked(engine: Engine) -> None
             connection.execute(sa.select(sa.func.count()).select_from(job_sources)).scalar_one()
             == sources_before
         )
+
+
+def test_a_tracker_patch_writes_only_its_columns_and_keeps_discovery_values(
+    engine: Engine,
+) -> None:
+    """A tracker-only payload must not blank the canonical discovery columns."""
+
+    from personal_job_finder_api.search.tracker import OpportunityTrackerService
+
+    stage(engine, run_id="run_1", records=[record()])
+    sheet = FakeSheet()
+    dispatcher(engine, sheet)[0].dispatch_due()
+    opportunity_row = next(row for row in outbox(engine) if row["entity_type"] == "opportunity")
+    opportunity_id = str(opportunity_row["entity_id"])
+    assert opportunity_row["status"] == "synced"
+
+    later = NOW + timedelta(minutes=10)
+    OpportunityTrackerService(engine, clock=lambda: later).update(
+        opportunity_id,
+        {"application_status": "Applied", "notes": "Recruiter replied"},
+    )
+    SyncDispatcher(
+        engine,
+        transport=FakeTransport(sheet),
+        spreadsheet_id="test_spreadsheet_id_1234567890",
+        clock=lambda: later,
+    ).dispatch_due()
+
+    written = dict(zip(OPPORTUNITY_HEADERS, sheet.rows("Opportunities")[1], strict=True))
+    assert written["application_status"] == "Applied"
+    assert written["notes"] == "Recruiter replied"
+    # Everything the patch did not supply is preserved from the canonical row.
+    assert written["company_name"] == "Acme Example"
+    assert written["job_title_original"] == "Backend Engineer"
+    assert written["job_title_normalized"] == "backend engineer"
+    assert written["user_status"] == "new"
+    assert len(sheet.rows("Opportunities")) == 2
+
+
+# ---------------------------------------------------------------------------
+# Tracker-only payloads must never recreate a deleted canonical row (M4C3A hardening)
+# ---------------------------------------------------------------------------
+
+
+def _synced_tracker_only_claim(engine: Engine, sheet: FakeSheet) -> str:
+    """Stage, sync, then queue a tracker-only edit; return the opportunity id."""
+
+    from personal_job_finder_api.search.tracker import OpportunityTrackerService
+
+    stage(engine, run_id="run_1", records=[record()])
+    dispatcher(engine, sheet)[0].dispatch_due()
+    row = next(entry for entry in outbox(engine) if entry["entity_type"] == "opportunity")
+    opportunity_id = str(row["entity_id"])
+    assert row["status"] == "synced"
+
+    later = NOW + timedelta(minutes=10)
+    OpportunityTrackerService(engine, clock=lambda: later).update(
+        opportunity_id,
+        {"application_status": "Applied", "notes": "Waiting for reply"},
+    )
+    return opportunity_id
+
+
+def test_a_tracker_only_payload_updates_the_existing_canonical_row(engine: Engine) -> None:
+    sheet = FakeSheet()
+    opportunity_id = _synced_tracker_only_claim(engine, sheet)
+    rows_before = len(sheet.rows("Opportunities"))
+    discovery_before = dict(zip(OPPORTUNITY_HEADERS, sheet.rows("Opportunities")[1], strict=True))
+
+    outcome = dispatcher(engine, sheet)[0].dispatch_due()
+
+    assert outcome.synced == 1
+    assert len(sheet.rows("Opportunities")) == rows_before
+    written = dict(zip(OPPORTUNITY_HEADERS, sheet.rows("Opportunities")[1], strict=True))
+    assert written["opportunity_id"] == opportunity_id
+    assert written["application_status"] == "Applied"
+    assert written["notes"] == "Waiting for reply"
+    for column in ("company_name", "job_title_original", "job_title_normalized", "location_raw"):
+        assert written[column] == discovery_before[column]
+
+
+def test_a_tracker_only_payload_never_recreates_a_deleted_canonical_row(
+    engine: Engine,
+) -> None:
+    sheet = FakeSheet()
+    opportunity_id = _synced_tracker_only_claim(engine, sheet)
+
+    # The user deletes the canonical row after the local refresh and the edit.
+    del sheet.rows("Opportunities")[1]
+    rows_before = len(sheet.rows("Opportunities"))
+    sources_before = [list(row) for row in sheet.rows("Job_Sources")]
+    outbox_before = next(entry for entry in outbox(engine) if entry["entity_type"] == "opportunity")
+
+    outcome = dispatcher(engine, sheet)[0].dispatch_due()
+
+    # Nothing was appended or written.
+    assert len(sheet.rows("Opportunities")) == rows_before
+    assert sheet.rows("Job_Sources") == sources_before
+    assert outcome.synced == 0
+
+    # The work is blocked, not silently dropped and not marked synced.
+    stored = next(entry for entry in outbox(engine) if entry["entity_type"] == "opportunity")
+    assert stored["status"] == "blocked"
+    assert stored["last_error_code"] == "canonical_row_missing"
+    assert stored["entity_id"] == opportunity_id
+    assert stored["synced_at_utc"] is None
+    assert stored["outbox_id"] == outbox_before["outbox_id"]
+
+    # The pending tracker edit is still recoverable from the stored payload.
+    payload = json.loads(str(stored["payload_json"]))
+    assert payload["application_status"] == "Applied"
+    assert payload["notes"] == "Waiting for reply"
+    assert sorted(payload["_pending_user_fields"]) == ["application_status", "notes"]
+
+    # The read model keeps the previously synchronized values and is not updated
+    # as though the blocked tracker edit had been published.
+    with engine.connect() as connection:
+        stored_row = (
+            connection.execute(
+                sa.select(
+                    opportunities_read_model.c.application_status,
+                    opportunities_read_model.c.notes,
+                )
+            )
+            .mappings()
+            .one()
+        )
+    assert stored_row["application_status"] is None
+    assert stored_row["notes"] is None
+
+
+def test_a_blocked_missing_canonical_row_recovers_after_the_row_is_restored(
+    engine: Engine,
+) -> None:
+    from personal_job_finder_api.repositories.sync_outbox import OutboxRepository
+
+    sheet = FakeSheet()
+    opportunity_id = _synced_tracker_only_claim(engine, sheet)
+    canonical_row = list(sheet.rows("Opportunities")[1])
+    del sheet.rows("Opportunities")[1]
+
+    dispatcher(engine, sheet)[0].dispatch_due()
+    blocked = next(entry for entry in outbox(engine) if entry["entity_type"] == "opportunity")
+    assert blocked["status"] == "blocked"
+    assert blocked["last_error_code"] == "canonical_row_missing"
+
+    # The user restores the canonical row, then uses the existing requeue flow.
+    sheet.rows("Opportunities").append(canonical_row)
+    later = NOW + timedelta(minutes=30)
+    assert OutboxRepository(engine).requeue_blocked(
+        outbox_id=str(blocked["outbox_id"]),
+        now=later,
+    )
+
+    outcome = SyncDispatcher(
+        engine,
+        transport=FakeTransport(sheet),
+        spreadsheet_id="test_spreadsheet_id_1234567890",
+        clock=lambda: later,
+    ).dispatch_due()
+
+    assert outcome.synced == 1
+    assert len(sheet.rows("Opportunities")) == 2
+    written = dict(zip(OPPORTUNITY_HEADERS, sheet.rows("Opportunities")[1], strict=True))
+    assert written["opportunity_id"] == opportunity_id
+    assert written["application_status"] == "Applied"
+    assert written["company_name"] == "Acme Example"
+
+
+def test_a_complete_discovery_payload_still_inserts_a_new_row(engine: Engine) -> None:
+    sheet = FakeSheet()
+
+    stage(engine, run_id="run_1", records=[record()])
+    outcome = dispatcher(engine, sheet)[0].dispatch_due()
+
+    assert outcome.synced == 2
+    assert len(sheet.rows("Opportunities")) == 2
+    written = dict(zip(OPPORTUNITY_HEADERS, sheet.rows("Opportunities")[1], strict=True))
+    assert written["company_name"] == "Acme Example"
+    assert written["job_title_original"] == "Backend Engineer"
+
+
+def test_a_transient_read_failure_is_not_reported_as_a_missing_canonical_row(
+    engine: Engine,
+) -> None:
+    sheet = FakeSheet()
+    _synced_tracker_only_claim(engine, sheet)
+    sync, transport = dispatcher(engine, sheet)
+    transport.read_error = GoogleSheetsError("server_error", "unavailable")
+
+    outcome = sync.dispatch_due()
+
+    assert outcome.synced == 0
+    stored = next(entry for entry in outbox(engine) if entry["entity_type"] == "opportunity")
+    assert stored["status"] == "retry_wait"
+    assert stored["last_error_code"] == "server_error"
+    assert stored["next_attempt_at_utc"] is not None
+    assert len(sheet.rows("Opportunities")) == 2
+
+
+def test_a_blocked_tracker_only_payload_does_not_write_unrelated_sources(
+    engine: Engine,
+) -> None:
+    from personal_job_finder_api.db.tables import sync_outbox
+
+    sheet = FakeSheet()
+    _synced_tracker_only_claim(engine, sheet)
+    sources_before = [list(row) for row in sheet.rows("Job_Sources")]
+
+    # The provenance row has queued work of its own when the parent disappears.
+    with engine.begin() as connection:
+        connection.execute(
+            sync_outbox.update()
+            .where(sync_outbox.c.entity_type == "job_source")
+            .values(status="pending", attempt_count=0)
+        )
+    del sheet.rows("Opportunities")[1]
+
+    outcome = dispatcher(engine, sheet)[0].dispatch_due()
+
+    assert sheet.rows("Job_Sources") == sources_before
+    assert outcome.synced == 0
+    stored = {str(row["entity_type"]): str(row["last_error_code"]) for row in outbox(engine)}
+    assert stored["opportunity"] == "canonical_row_missing"
+    assert stored["job_source"] == "missing_parent_opportunity"

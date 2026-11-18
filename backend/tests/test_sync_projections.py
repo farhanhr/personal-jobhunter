@@ -20,6 +20,7 @@ from personal_job_finder_api.sync.projections import (
     JOB_SOURCE_TAB,
     OPPORTUNITY_TAB,
     ProjectionError,
+    is_tracker_only_opportunity_payload,
     project_job_source,
     project_opportunity,
     row_values,
@@ -432,3 +433,62 @@ def test_projection_never_evaluates_source_text_as_a_formula() -> None:
 
     assert mapped["company_name"] == '=IMPORTXML("https://example.test")'
     assert mapped["description"] == "@SUM(1+1)"
+
+
+# ---------------------------------------------------------------------------
+# Tracker-only payload classification (M4C3A hardening)
+# ---------------------------------------------------------------------------
+
+
+def test_a_complete_discovery_payload_is_not_classified_as_tracker_only() -> None:
+    assert not is_tracker_only_opportunity_payload(OPPORTUNITY_PAYLOAD)
+
+
+def test_a_tracker_only_payload_is_classified_as_tracker_only() -> None:
+    payload = {
+        "opportunity_id": "opp_1",
+        "application_status": "Applied",
+        "notes": "Waiting for reply",
+        "_pending_user_fields": ["application_status", "notes"],
+    }
+
+    assert is_tracker_only_opportunity_payload(payload)
+
+
+def test_a_payload_with_any_discovery_key_is_not_tracker_only() -> None:
+    """A single discovery column is enough to prove the payload builds a row."""
+
+    for key in ("company_id", "job_title", "location_status", "description"):
+        payload = {
+            "opportunity_id": "opp_1",
+            "notes": "Waiting",
+            "_pending_user_fields": ["notes"],
+            key: "value",
+        }
+        assert not is_tracker_only_opportunity_payload(payload), key
+
+
+def test_a_legacy_tracker_payload_without_a_discriminator_still_classifies() -> None:
+    """Payloads queued before this change carry no marker and must still work."""
+
+    legacy = {
+        "opportunity_id": "opp_1",
+        "job_type": "Internship",
+        "_pending_user_fields": ["job_type"],
+    }
+
+    assert is_tracker_only_opportunity_payload(legacy)
+
+
+def test_internal_metadata_never_becomes_a_projection_column() -> None:
+    payload = {
+        "opportunity_id": "opp_1",
+        "notes": "Waiting",
+        "_pending_user_fields": ["notes"],
+    }
+
+    row = project_opportunity(payload)
+
+    assert row.headers == OPPORTUNITY_HEADERS
+    assert "_pending_user_fields" not in row.headers
+    assert "_pending_user_fields" not in OPPORTUNITY_HEADERS

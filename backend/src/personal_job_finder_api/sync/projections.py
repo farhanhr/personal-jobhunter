@@ -63,6 +63,35 @@ OPPORTUNITY_SUPPLIED_BY_PAYLOAD_KEY: Mapping[str, tuple[str, ...]] = {
     "posted_at_utc": ("posted_at",),
 }
 
+# The only keys a tracker-only payload may carry: the stable identity, the
+# user-owned tracker headers, and the internal ownership list. Anything else
+# means the payload also describes discovery data.
+_OPPORTUNITY_IDENTITY_KEY = "opportunity_id"
+_TRACKER_ONLY_PERMITTED_KEYS = frozenset(
+    {
+        _OPPORTUNITY_IDENTITY_KEY,
+        *OPPORTUNITY_TRACKER_HEADERS,
+        PENDING_USER_FIELDS_KEY,
+    }
+)
+
+
+def is_tracker_only_opportunity_payload(payload: Mapping[str, Any]) -> bool:
+    """Report whether an opportunity payload describes only user-owned tracker edits.
+
+    A tracker-only payload has no discovery columns, so it cannot create a
+    complete canonical row on its own; it can only update a row that already
+    exists in the spreadsheet. The test is a key-set check against the payload
+    contract rather than a display-field guess such as "has a job title":
+    discovery payloads always carry at least one key outside the tracker set.
+
+    Compatibility: older pending tracker payloads were built from the same
+    contract (identity, tracker headers, ownership list), so they classify
+    correctly without a stored discriminator.
+    """
+
+    return set(payload).issubset(_TRACKER_ONLY_PERMITTED_KEYS)
+
 
 class ProjectionError(Exception):
     """Raised when a payload cannot be projected safely."""

@@ -178,6 +178,25 @@ def apply_read_model_change(connection: Any, change: ReadModelChange) -> None:
     connection.execute(update(table).where(column == change.identity).values(**dict(change.values)))
 
 
+def find_read_model_opportunity(
+    connection: Any,
+    *,
+    opportunity_id: str,
+) -> dict[str, Any] | None:
+    """Return one cached canonical opportunity row, or ``None`` when unknown."""
+
+    row = (
+        connection.execute(
+            select(opportunities_read_model).where(
+                opportunities_read_model.c.opportunity_id == opportunity_id
+            )
+        )
+        .mappings()
+        .one_or_none()
+    )
+    return dict(row) if row is not None else None
+
+
 def read_model_row_exists(connection: Any, *, tab: str, identity: str) -> bool:
     """Report whether one read-model row is already cached."""
 

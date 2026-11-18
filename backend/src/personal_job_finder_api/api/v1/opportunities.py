@@ -9,14 +9,21 @@ from __future__ import annotations
 from typing import Annotated, Literal
 
 from fastapi import APIRouter, Depends, Query, Request, Response
-from pydantic import BaseModel
+from pydantic import BaseModel, ConfigDict, Field, model_validator
 
+from personal_job_finder_api.api.errors import ApiError
 from personal_job_finder_api.api.security import validate_local_request
 from personal_job_finder_api.search.feed import (
     DEFAULT_PAGE_SIZE,
     MAX_PAGE_SIZE,
     FeedPage,
     OpportunityFeedService,
+)
+from personal_job_finder_api.search.tracker import (
+    TRACKER_FIELDS,
+    OpportunityTrackerService,
+    TrackerNotFound,
+    TrackerStateInconsistent,
 )
 
 router = APIRouter(
@@ -25,6 +32,10 @@ router = APIRouter(
 )
 
 FeedName = Literal["main", "review"]
+
+# The contract fixes this at 10,000 characters; a longer note is rejected rather
+# than silently truncated, so the user's text is never altered.
+NOTES_MAX_LENGTH = 10_000
 
 
 class SourceSummaryResponse(BaseModel):
@@ -70,8 +81,62 @@ class OpportunityFeedResponse(BaseModel):
     total_pages: int
 
 
+class TrackerPatchRequest(BaseModel):
+    """One tracker patch; only the seven user-owned fields are accepted.
+
+    ``extra="forbid"`` is what keeps ``user_status`` and every discovery-owned
+    column out of this endpoint. A field that is omitted stays unchanged, while an
+    explicit ``null`` or an empty string clears it, so the request model relies on
+    ``model_fields_set`` rather than the parsed value.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    job_type: str | None = None
+    date_applied: str | None = None
+    application_status: str | None = None
+    follow_up_date: str | None = None
+    interview_date: str | None = None
+    vacancy_url: str | None = None
+    notes: str | None = Field(default=None, max_length=NOTES_MAX_LENGTH)
+
+    @model_validator(mode="after")
+    def _require_at_least_one_field(self) -> TrackerPatchRequest:
+        if not self.model_fields_set:
+            raise ValueError("Supply at least one tracker field to update.")
+        return self
+
+    def supplied(self) -> dict[str, str | None]:
+        """Return only the fields the client actually sent."""
+
+        return {
+            field: getattr(self, field)
+            for field in TRACKER_FIELDS
+            if field in self.model_fields_set
+        }
+
+
+class TrackerResponse(BaseModel):
+    opportunity_id: str
+    job_type: str | None
+    date_applied: str | None
+    application_status: str | None
+    follow_up_date: str | None
+    interview_date: str | None
+    vacancy_url: str | None
+    notes: str | None
+    sync_status: str
+
+
 def get_opportunity_feed_service(request: Request) -> OpportunityFeedService:
     return OpportunityFeedService(request.app.state.engine)
+
+
+def get_tracker_service(request: Request) -> OpportunityTrackerService:
+    return OpportunityTrackerService(
+        request.app.state.engine,
+        clock=request.app.state.clock,
+    )
 
 
 @router.get("/jobs", response_model=OpportunityFeedResponse)
@@ -87,6 +152,48 @@ def list_opportunities(
     page_result = service.list_feed(feed=feed, page=page, page_size=page_size)
     response.headers["Cache-Control"] = "no-store"
     return _to_response(page_result)
+
+
+@router.patch(
+    "/opportunities/{opportunity_id}/tracker",
+    response_model=TrackerResponse,
+    status_code=200,
+)
+def update_tracker(
+    opportunity_id: str,
+    patch: TrackerPatchRequest,
+    response: Response,
+    service: Annotated[OpportunityTrackerService, Depends(get_tracker_service)],
+) -> TrackerResponse:
+    """Queue a user-owned tracker edit; synchronization stays manual.
+
+    No Google request happens here. The edit becomes pending outbox work that the
+    existing dispatcher writes on the next explicit sync, and the read model is
+    updated only by that settlement.
+    """
+
+    try:
+        result = service.update(opportunity_id, patch.supplied())
+    except TrackerNotFound:
+        raise ApiError(
+            404,
+            "opportunity_not_found",
+            "The opportunity does not exist in local data.",
+        ) from None
+    except TrackerStateInconsistent:
+        raise ApiError(
+            409,
+            "tracker_state_inconsistent",
+            "This opportunity has no canonical row yet. Synchronize it before "
+            "editing tracker fields.",
+        ) from None
+
+    response.headers["Cache-Control"] = "no-store"
+    return TrackerResponse(
+        opportunity_id=result.opportunity_id,
+        sync_status=result.sync_status,
+        **result.values,
+    )
 
 
 def _to_response(page_result: FeedPage) -> OpportunityFeedResponse:
