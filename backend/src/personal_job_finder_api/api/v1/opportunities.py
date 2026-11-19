@@ -48,6 +48,17 @@ class SourceSummaryResponse(BaseModel):
     run_ids: list[str]
 
 
+class TrackerSummaryResponse(BaseModel):
+    """The tracker fields a feed card needs. ``notes`` stays on the detail view."""
+
+    application_status: str | None
+    date_applied: str | None
+    follow_up_date: str | None
+    interview_date: str | None
+    sync_status: str
+    known_fields: list[str]
+
+
 class OpportunityResponse(BaseModel):
     opportunity_id: str
     company_id: str
@@ -70,6 +81,44 @@ class OpportunityResponse(BaseModel):
     feed_bucket: str
     description_excerpt: str | None
     has_more_description: bool
+    tracker_summary: TrackerSummaryResponse
+    sources: list[SourceSummaryResponse]
+
+
+class OpportunityDetailResponse(BaseModel):
+    """One opportunity: discovery metadata, full description, provenance, tracker."""
+
+    opportunity_id: str
+    company_id: str
+    company_name: str
+    job_title: str
+    target_role_id: str | None
+    role_match_type: str | None
+    role_match_reason: str | None
+    location_raw: str | None
+    country: str | None
+    province: str | None
+    city: str | None
+    location_status: str
+    location_reason: str | None
+    work_mode: str
+    remote_scope: str
+    posted_at_utc: str | None
+    source_updated_at_utc: str | None
+    first_seen_at_utc: str
+    last_seen_at_utc: str
+    availability_status: str
+    feed_bucket: str
+    description: str | None
+    job_type: str | None
+    date_applied: str | None
+    application_status: str | None
+    follow_up_date: str | None
+    interview_date: str | None
+    vacancy_url: str | None
+    notes: str | None
+    sync_status: str
+    known_fields: list[str]
     sources: list[SourceSummaryResponse]
 
 
@@ -126,6 +175,7 @@ class TrackerResponse(BaseModel):
     vacancy_url: str | None
     notes: str | None
     sync_status: str
+    known_fields: list[str]
 
 
 def get_opportunity_feed_service(request: Request) -> OpportunityFeedService:
@@ -152,6 +202,30 @@ def list_opportunities(
     page_result = service.list_feed(feed=feed, page=page, page_size=page_size)
     response.headers["Cache-Control"] = "no-store"
     return _to_response(page_result)
+
+
+@router.get("/jobs/{opportunity_id}", response_model=OpportunityDetailResponse)
+def get_opportunity_detail(
+    opportunity_id: str,
+    response: Response,
+    service: Annotated[OpportunityFeedService, Depends(get_opportunity_feed_service)],
+) -> OpportunityDetailResponse:
+    """Return one opportunity with its full description and tracker state.
+
+    This reads local data only. It never contacts Google Sheets, and a tracker
+    edit still queued in the outbox is reported as the effective value.
+    """
+
+    detail = service.get_detail(opportunity_id)
+    if detail is None:
+        raise ApiError(
+            404,
+            "opportunity_not_found",
+            "The opportunity does not exist in local data.",
+        )
+
+    response.headers["Cache-Control"] = "no-store"
+    return _to_detail_response(detail)
 
 
 @router.patch(
@@ -192,7 +266,31 @@ def update_tracker(
     return TrackerResponse(
         opportunity_id=result.opportunity_id,
         sync_status=result.sync_status,
+        known_fields=list(result.known_fields),
         **result.values,
+    )
+
+
+def _to_source_response(source) -> SourceSummaryResponse:
+    return SourceSummaryResponse(
+        source_type=source.source_type,
+        external_source_id=source.external_source_id,
+        source_url=source.source_url,
+        source_url_is_safe=source.source_url_is_safe,
+        captured_at_utc=source.captured_at_utc,
+        provenance_note=source.provenance_note,
+        run_ids=list(source.run_ids),
+    )
+
+
+def _to_tracker_summary(tracker) -> TrackerSummaryResponse:
+    return TrackerSummaryResponse(
+        application_status=tracker.values.get("application_status"),
+        date_applied=tracker.values.get("date_applied"),
+        follow_up_date=tracker.values.get("follow_up_date"),
+        interview_date=tracker.values.get("interview_date"),
+        sync_status=tracker.sync_status,
+        known_fields=list(tracker.known_fields),
     )
 
 
@@ -221,18 +319,8 @@ def _to_response(page_result: FeedPage) -> OpportunityFeedResponse:
                 feed_bucket=item.feed_bucket,
                 description_excerpt=item.description_excerpt,
                 has_more_description=item.has_more_description,
-                sources=[
-                    SourceSummaryResponse(
-                        source_type=source.source_type,
-                        external_source_id=source.external_source_id,
-                        source_url=source.source_url,
-                        source_url_is_safe=source.source_url_is_safe,
-                        captured_at_utc=source.captured_at_utc,
-                        provenance_note=source.provenance_note,
-                        run_ids=list(source.run_ids),
-                    )
-                    for source in item.sources
-                ],
+                tracker_summary=_to_tracker_summary(item.tracker),
+                sources=[_to_source_response(source) for source in item.sources],
             )
             for item in page_result.items
         ],
@@ -240,4 +328,41 @@ def _to_response(page_result: FeedPage) -> OpportunityFeedResponse:
         page_size=page_result.page_size,
         total_items=page_result.total_items,
         total_pages=page_result.total_pages,
+    )
+
+
+def _to_detail_response(detail) -> OpportunityDetailResponse:
+    return OpportunityDetailResponse(
+        opportunity_id=detail.opportunity_id,
+        company_id=detail.company_id,
+        company_name=detail.company_name,
+        job_title=detail.job_title,
+        target_role_id=detail.target_role_id,
+        role_match_type=detail.role_match_type,
+        role_match_reason=detail.role_match_reason,
+        location_raw=detail.location_raw,
+        country=detail.country,
+        province=detail.province,
+        city=detail.city,
+        location_status=detail.location_status,
+        location_reason=detail.location_reason,
+        work_mode=detail.work_mode,
+        remote_scope=detail.remote_scope,
+        posted_at_utc=detail.posted_at_utc,
+        source_updated_at_utc=detail.source_updated_at_utc,
+        first_seen_at_utc=detail.first_seen_at_utc,
+        last_seen_at_utc=detail.last_seen_at_utc,
+        availability_status=detail.availability_status,
+        feed_bucket=detail.feed_bucket,
+        description=detail.description,
+        job_type=detail.tracker.values.get("job_type"),
+        date_applied=detail.tracker.values.get("date_applied"),
+        application_status=detail.tracker.values.get("application_status"),
+        follow_up_date=detail.tracker.values.get("follow_up_date"),
+        interview_date=detail.tracker.values.get("interview_date"),
+        vacancy_url=detail.tracker.values.get("vacancy_url"),
+        notes=detail.tracker.values.get("notes"),
+        sync_status=detail.tracker.sync_status,
+        known_fields=list(detail.tracker.known_fields),
+        sources=[_to_source_response(source) for source in detail.sources],
     )

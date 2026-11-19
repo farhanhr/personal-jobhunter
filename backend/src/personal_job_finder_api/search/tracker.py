@@ -34,7 +34,6 @@ from sqlalchemy import Engine
 from personal_job_finder_api.core.time import format_utc, utc_now
 from personal_job_finder_api.db.engine import immediate_transaction
 from personal_job_finder_api.integrations.google_sheets.config import (
-    OPPORTUNITY_TRACKER_HEADERS,
     PENDING_USER_FIELDS_KEY,
 )
 from personal_job_finder_api.repositories.opportunities import (
@@ -43,19 +42,20 @@ from personal_job_finder_api.repositories.opportunities import (
     OpportunityStagingRepository,
 )
 from personal_job_finder_api.repositories.read_model import find_read_model_opportunity
+from personal_job_finder_api.search.tracker_read import (
+    SYNC_NOT_QUEUED,
+    SYNC_SYNCED,
+    TRACKER_FIELDS,
+    known_tracker_values,
+    outbox_payload,
+    sync_status_for,
+)
 from personal_job_finder_api.sync.projections import is_tracker_only_opportunity_payload
-
-TRACKER_FIELDS = OPPORTUNITY_TRACKER_HEADERS
 
 # Statuses that prove a canonical row may already exist. ``in_progress``,
 # ``retry_wait`` and ``blocked`` can follow a write whose response was lost, so
 # the row may be in the sheet even though local state does not say ``synced``.
 _DELIVERED_STATUSES = frozenset({"synced", "in_progress", "retry_wait", "blocked"})
-
-# Sync states reported to the caller. ``not_queued`` means nothing is pending and
-# no canonical row is cached either, so the effective values are all blank.
-SYNC_NOT_QUEUED = "not_queued"
-SYNC_SYNCED = "synced"
 
 
 class TrackerError(Exception):
@@ -83,6 +83,7 @@ class TrackerResult:
     opportunity_id: str
     values: Mapping[str, str | None]
     sync_status: str
+    known_fields: tuple[str, ...] = ()
 
 
 class OpportunityTrackerService:
@@ -171,7 +172,7 @@ def _require_safe_target(
         raise TrackerStateInconsistent()
     if str(outbox["status"]) in _DELIVERED_STATUSES:
         return
-    if not is_tracker_only_opportunity_payload(_payload(outbox)):
+    if not is_tracker_only_opportunity_payload(outbox_payload(outbox)):
         # An unsent full discovery payload will create the row completely, and
         # the merge keeps those columns.
         return
@@ -185,27 +186,12 @@ def _known_values(
 ) -> dict[str, str | None]:
     """Return only the tracker values whose canonical state is known locally.
 
-    The read model mirrors the sheet, so it makes every tracker field known. An
-    unsynced outbox row makes only the fields it declares as pending known: those
-    are local edits that have not been published yet. Any field missing from the
-    result cannot be compared safely, because the sheet may already hold a value
-    this machine has not read.
+    Shared with the read side so a patch and a read always agree on precedence:
+    pending user-owned outbox fields override the Read Model, and no other field
+    does.
     """
 
-    known: dict[str, str | None] = {}
-    if read_model is not None:
-        for field in TRACKER_FIELDS:
-            known[field] = _as_text(read_model.get(field))
-
-    if outbox is not None and str(outbox["status"]) != SYNC_SYNCED:
-        payload = _payload(outbox)
-        pending = payload.get(PENDING_USER_FIELDS_KEY)
-        if isinstance(pending, list):
-            for field in pending:
-                if field in TRACKER_FIELDS:
-                    known[field] = _as_text(payload.get(field))
-
-    return known
+    return known_tracker_values(read_model=read_model, outbox=outbox)
 
 
 def _changes_values(
@@ -249,14 +235,6 @@ def _outbox_id(outbox: Mapping[str, Any] | None, opportunity_id: str) -> str:
     return f"outbox_opp_{opportunity_id.removeprefix('opp_')}"
 
 
-def _payload(outbox: Mapping[str, Any]) -> dict[str, Any]:
-    try:
-        payload = json.loads(str(outbox["payload_json"]))
-    except (TypeError, ValueError):
-        return {}
-    return payload if isinstance(payload, dict) else {}
-
-
 def _as_text(value: Any) -> str | None:
     """Treat a blank cell and an explicit clear as the same absent value."""
 
@@ -276,27 +254,19 @@ def _result(
     outbox: Mapping[str, Any] | None,
     read_model: Mapping[str, Any] | None,
 ) -> TrackerResult:
-    """Build the response, reporting unknown fields as absent rather than guessed."""
+    """Build the response, reporting unknown fields as absent rather than guessed.
+
+    ``known_fields`` is what lets a client tell a cleared field from a field no
+    local source has ever seen; the values alone cannot express that difference.
+    """
 
     effective: dict[str, str | None] = {field: values.get(field) for field in TRACKER_FIELDS}
     return TrackerResult(
         opportunity_id=opportunity_id,
         values=effective,
-        sync_status=_sync_status(outbox=outbox, read_model=read_model),
+        known_fields=tuple(sorted(values)),
+        sync_status=sync_status_for(outbox=outbox, read_model=read_model),
     )
-
-
-def _sync_status(
-    *,
-    outbox: Mapping[str, Any] | None,
-    read_model: Mapping[str, Any] | None,
-) -> str:
-    if outbox is not None:
-        return str(outbox["status"])
-    if read_model is not None:
-        # The canonical mirror is the only source, so nothing is pending.
-        return SYNC_SYNCED
-    return SYNC_NOT_QUEUED
 
 
 __all__ = [
