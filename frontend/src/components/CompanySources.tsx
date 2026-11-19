@@ -5,6 +5,8 @@ import {
   updateCompanySource,
   type CompanySource,
 } from '../api/companies'
+import { Input } from './ui/input'
+import { Label } from './ui/label'
 
 type LoadState =
   | { status: 'loading' }
@@ -186,8 +188,8 @@ export function CompanySources({ onSourcePolicyChanged }: CompanySourcesProps = 
           <form className="settings-form" onSubmit={handleSubmit} noValidate>
             <h3>Register a Greenhouse board</h3>
             <div className="company-form-fields">
-              <label htmlFor="company-name">Company name</label>
-              <input
+              <Label htmlFor="company-name">Company name</Label>
+              <Input
                 id="company-name"
                 value={companyName}
                 onChange={(event) => setCompanyName(event.target.value)}
@@ -196,8 +198,8 @@ export function CompanySources({ onSourcePolicyChanged }: CompanySourcesProps = 
                 disabled={isSubmitting}
               />
 
-              <label htmlFor="company-board-token">Board token</label>
-              <input
+              <Label htmlFor="company-board-token">Board token</Label>
+              <Input
                 id="company-board-token"
                 value={boardToken}
                 onChange={(event) => setBoardToken(event.target.value)}

@@ -5,6 +5,8 @@ import {
   type TargetRole,
   type TargetRoleDraft,
 } from '../api/targetRoles'
+import { Input } from './ui/input'
+import { Label } from './ui/label'
 
 type RoleForm = {
   key: string
@@ -184,8 +186,8 @@ export function TargetRolesSettings() {
               >
                 <legend>Primary role {index + 1}</legend>
 
-                <label htmlFor={`${role.key}-name`}>Primary role name</label>
-                <input
+                <Label htmlFor={`${role.key}-name`}>Primary role name</Label>
+                <Input
                   id={`${role.key}-name`}
                   value={role.canonical_name}
                   onChange={(event) =>
@@ -195,10 +197,10 @@ export function TargetRolesSettings() {
                   maxLength={200}
                 />
 
-                <label htmlFor={`${role.key}-aliases`}>
+                <Label htmlFor={`${role.key}-aliases`}>
                   Aliases (comma-separated)
-                </label>
-                <input
+                </Label>
+                <Input
                   id={`${role.key}-aliases`}
                   value={role.aliasesText}
                   onChange={(event) =>
