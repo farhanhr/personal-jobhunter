@@ -44,6 +44,22 @@ ROLE = TargetRoleSpec(
 )
 
 
+def _row_window(address: str) -> tuple[int | None, int | None]:
+    """Return the row bounds of an A1 address such as ``A5:A5``.
+
+    Column-only ranges (``A:AG``) have no row bounds and return ``(None, None)``.
+    """
+
+    start, _, end = address.partition(":")
+    digits = "".join(ch for ch in start if ch.isdigit())
+    if not digits:
+        return None, None
+    first = int(digits)
+    end_digits = "".join(ch for ch in end if ch.isdigit())
+    last = int(end_digits) if end_digits else first
+    return first, last
+
+
 class FakeSheet:
     """The subset of one spreadsheet the dispatcher reads and writes."""
 
@@ -74,9 +90,17 @@ class FakeTransport:
         self.calls.append("batch_get_values")
         value_ranges: list[dict[str, Any]] = []
         for requested in ranges:
-            tab = requested.split("!", 1)[0]
+            tab, address = str(requested).split("!", 1)
             rows = self.sheet.tabs.get(tab, [])
-            value_ranges.append({"values": [list(row) for row in rows]} if rows else {})
+            first, last = _row_window(address)
+            if first is None:
+                # Whole-column range: return every row of the tab.
+                value_ranges.append({"values": [list(row) for row in rows]} if rows else {})
+                continue
+            # Narrow range (the pre-write revalidation read): like the real API,
+            # return only the requested rows; past-the-end rows come back empty.
+            selected = rows[first - 1 : last] if first <= len(rows) else []
+            value_ranges.append({"values": [list(row) for row in selected]} if selected else {})
         return {"valueRanges": value_ranges}
 
     def batch_update_values(

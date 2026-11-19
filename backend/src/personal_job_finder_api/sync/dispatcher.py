@@ -101,6 +101,10 @@ PERMANENT_ERROR_CODES = frozenset(
         # A tracker-only payload cannot create a complete canonical row, so a
         # deleted row is an operator-action-required conflict, not a retry.
         "canonical_row_missing",
+        # A write that may have committed but cannot be proven correct needs a
+        # human to inspect the sheet; retrying could repeat the damage.
+        "canonical_identity_map_changed",
+        "canonical_write_count_mismatch",
         "batch_too_large",
         "invalid_request",
         "malformed_response",
@@ -205,6 +209,46 @@ class _PlannedWrite:
     row_number: int | None
     projection: ProjectedRow
     parent: ReadModelChange | None = None
+    # True when the plan targets a row that already held this identity at read
+    # time. False for a planned append, whose destination must still be empty.
+    existing_row_expected: bool = False
+
+
+def _row_moved_error() -> GoogleSheetsError:
+    """A retryable signal that the planned physical row no longer matches."""
+
+    return GoogleSheetsError(
+        "row_moved",
+        "The spreadsheet changed after it was read. The row will be planned again.",
+    )
+
+
+def _identity_at(actual: Mapping[int, str], row: int) -> str | None:
+    """Return the identity at one canonical row, or None when the row is empty."""
+
+    return actual.get(row)
+
+
+def _parse_identity_map(rows: Sequence[Sequence[str]]) -> dict[int, str]:
+    """Map every populated canonical row to its identity, skipping the header."""
+
+    identities: dict[int, str] = {}
+    for row_number, row in enumerate(rows[1:], start=2):
+        identity = row[0] if row else ""
+        if identity:
+            identities[row_number] = identity
+    return identities
+
+
+def _identity_map_changed() -> GoogleSheetsError:
+    """An operator-action-required signal for an unverifiable committed write."""
+
+    return GoogleSheetsError(
+        "canonical_identity_map_changed",
+        "The canonical sheet changed in an unexpected way after writing. "
+        "Manual inspection is required; the affected work was not marked "
+        "as synchronized.",
+    )
 
 
 class SyncDispatcher:
@@ -487,6 +531,7 @@ class SyncDispatcher:
                 settled.append(self._block(claim, error_code="withdrawal_unsupported"))
                 continue
 
+            existing_row_expected = row_number is not None
             if row_number is None:
                 row_number = next_row
                 next_row += 1
@@ -496,24 +541,39 @@ class SyncDispatcher:
                     row_number=row_number,
                     projection=projection,
                     parent=parent_change,
+                    existing_row_expected=existing_row_expected,
                 )
             )
         if not planned:
             return settled
 
         written: list[_PlannedWrite] = []
+        pending = list(planned)
         try:
             for start in range(0, len(planned), self._batch_size):
                 chunk = planned[start : start + self._batch_size]
-                self._write(tab, chunk)
-                self._verify(tab, chunk)
-                written.extend(chunk)
+                # Revalidate immediately before writing: a manual insert or delete
+                # since the read would otherwise send a full row to a stale index.
+                fresh, stale, baseline = self._revalidate(tab, chunk)
+                for item in stale:
+                    settled.append(self._settle_failure(item.claim, _row_moved_error()))
+                settled_ids = {item.claim.outbox_id for item in stale}
+                pending = [item for item in pending if item.claim.outbox_id not in settled_ids]
+                if not fresh:
+                    continue
+                response = self._write(tab, fresh)
+                self._verify_write_count(fresh, response)
+                self._verify(baseline=baseline, planned=fresh, tab=tab)
+                written.extend(fresh)
+                written_ids = {item.claim.outbox_id for item in fresh}
+                pending = [item for item in pending if item.claim.outbox_id not in written_ids]
         except GoogleSheetsError as error:
-            remainder = planned[len(written) :]
+            # ``pending`` holds exactly the claims that were neither written nor
+            # already settled as row-moved, so none is marked synced by mistake.
             return [
                 *settled,
                 *(self._mark_synced(item.claim, item.projection, item.parent) for item in written),
-                *(self._settle_failure(item.claim, error) for item in remainder),
+                *(self._settle_failure(item.claim, error) for item in pending),
             ]
 
         return [
@@ -555,7 +615,7 @@ class SyncDispatcher:
             positions[identity] = row_number
         return _TableState(rows=rows, positions=positions)
 
-    def _write(self, tab: str, planned: Sequence[_PlannedWrite]) -> None:
+    def _write(self, tab: str, planned: Sequence[_PlannedWrite]) -> dict[str, Any]:
         last_column = column_letter(len(TAB_HEADERS[tab]))
         data: list[dict[str, Any]] = []
 
@@ -568,23 +628,144 @@ class SyncDispatcher:
                 }
             )
 
-        self._client.batch_update_values(self._spreadsheet_id, data)
+        return self._client.batch_update_values(self._spreadsheet_id, data)
 
-    def _verify(self, tab: str, written: Sequence[_PlannedWrite]) -> None:
-        """Confirm the written identities are present before settling as synced.
+    def _capture_identity_map(self, tab: str) -> Mapping[int, str]:
+        """Read the canonical identity column as ``{row_number: identity}``.
 
-        ``batchUpdate`` is not transactional, so a partial failure can leave some
-        rows applied. Re-reading also makes a lost response safe: the next attempt
-        finds the row by identity instead of appending a duplicate.
+        The mapping covers every populated row (the header is skipped). Comparing
+        it before and after a write catches a lost or moved identity even when the
+        overwrite does not create a duplicate identity.
         """
 
-        state = self._read_table(tab)
-        for item in written:
-            if state.row_of(item.claim.entity_id) is None:
-                raise GoogleSheetsError(
-                    "write_not_confirmed",
-                    "The spreadsheet did not retain the written row.",
-                )
+        identity_range = f"{tab}!A:A"
+        values = self._client.get_values(self._spreadsheet_id, [identity_range])
+        return _parse_identity_map(values.get(identity_range, []))
+
+    def _revalidate(
+        self,
+        tab: str,
+        planned: Sequence[_PlannedWrite],
+    ) -> tuple[list[_PlannedWrite], list[_PlannedWrite], Mapping[int, str]]:
+        """Split a chunk and capture the baseline identity map in one read.
+
+        One batched read of the canonical identity column both checks every
+        planned physical row and records the complete pre-write identity map.
+        Keeping them in the same read avoids adding another read→write gap just
+        to take the baseline.
+
+        An existing row is fresh only if it still holds the claimed identity. A
+        planned append row is fresh only if it is still empty. Anything else
+        means the plan was built from a stale read, so it must not be written to
+        that row. This narrows the window; it does not make the read and write
+        atomic.
+        """
+
+        if not planned:
+            return [], [], {}
+        identity_range = f"{tab}!A:A"
+        values = self._client.get_values(self._spreadsheet_id, [identity_range])
+        baseline = _parse_identity_map(values.get(identity_range, []))
+
+        fresh: list[_PlannedWrite] = []
+        stale: list[_PlannedWrite] = []
+        for item in planned:
+            assert item.row_number is not None
+            current = _identity_at(baseline, item.row_number)
+            if item.claim.entity_id == current:
+                fresh.append(item)
+            elif item.existing_row_expected:
+                stale.append(item)
+            elif current is None:
+                fresh.append(item)
+            else:
+                stale.append(item)
+        return fresh, stale, baseline
+
+    def _verify(
+        self,
+        *,
+        baseline: Mapping[int, str],
+        planned: Sequence[_PlannedWrite],
+        tab: str,
+    ) -> None:
+        """Compare the post-write identity map with the expected one.
+
+        Expected = the revalidation baseline plus this chunk's legitimate
+        operations. Existing-row updates keep the identity at the same row;
+        planned inserts add exactly one identity at their planned row. No planned
+        operation deletes an identity: a withdrawal still writes its canonical
+        row, only its status changes.
+
+        Any other difference is an integrity anomaly: a known identity vanished,
+        moved, appeared twice, appeared out of nowhere, a planned insert landed
+        elsewhere, or the maps differ in any other way. The write has already
+        committed; this never rolls anything back. Its only job is to prevent an
+        uncertain claim from being settled as synchronized.
+
+        Residual limits (this is not atomic and not race-free):
+
+        - Only identities present in the revalidation baseline can be missed. A
+          row inserted externally after baseline capture and then overwritten by
+          this write was never in the comparison.
+        - ``totalUpdatedRows`` (checked by the caller) cannot say which row was
+          overwritten; it is supplementary evidence only.
+        - The process-local dispatch guard does not block external spreadsheet
+          editors or other processes.
+        - The map compares identities, not cell values: a write that keeps the
+          identity in place but silently fails to update another column is not
+          detected here.
+        """
+
+        expected = dict(baseline)
+        for item in planned:
+            assert item.row_number is not None
+            identity = item.claim.entity_id
+            if item.existing_row_expected:
+                if baseline.get(item.row_number) != identity:
+                    raise _identity_map_changed()
+                continue
+            if item.row_number in baseline:
+                raise _identity_map_changed()
+            if identity in baseline.values():
+                # Inserting an identity that already exists elsewhere would
+                # create a duplicate the map comparison could otherwise accept.
+                raise _identity_map_changed()
+            expected[item.row_number] = identity
+
+        actual = self._capture_identity_map(tab)
+        if actual != expected:
+            raise _identity_map_changed()
+
+    def _verify_write_count(
+        self,
+        planned: Sequence[_PlannedWrite],
+        response: Mapping[str, Any],
+    ) -> None:
+        """Validate the optional ``totalUpdatedRows`` write response field.
+
+        The official Sheets ``values.batchUpdate`` response supplies it; a simple
+        transport may omit it. When absent or not an integer, the count check is
+        unavailable and is skipped rather than inventing a value -- the identity
+        map comparison remains the primary integrity check. When present, a count
+        different from the number of distinct rows in this request means the batch
+        may have been applied somewhere unexpected.
+
+        The count cannot identify which row was affected. It is supplementary
+        evidence, not a substitute for the identity map.
+        """
+
+        reported = response.get("totalUpdatedRows")
+        if not isinstance(reported, int) or isinstance(reported, bool):
+            return
+        expected = len({item.row_number for item in planned})
+        if reported != expected:
+            raise GoogleSheetsError(
+                "canonical_write_count_mismatch",
+                "The spreadsheet reported a different number of updated rows "
+                "than this batch contained. Manual inspection is required; the "
+                "affected work was not marked as synchronized.",
+            )
 
     def _mark_synced(
         self,
