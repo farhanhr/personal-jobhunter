@@ -1,101 +1,44 @@
-import { useEffect, useState } from 'react'
-import { fetchHealth, type HealthResponse } from './api/health'
-import { CompanySources } from './components/CompanySources'
-import { SearchRunPanel } from './components/SearchRunPanel'
-import { TargetRolesSettings } from './components/TargetRolesSettings'
+import { BrowserRouter, Route, Routes } from 'react-router'
+import { AppShell } from './components/AppShell'
+import { PageHeader } from './components/PageHeader'
+import { DashboardPage } from './pages/DashboardPage'
+import { OpportunityDetailPage } from './pages/OpportunityDetailPage'
+import { OpportunitiesPage } from './pages/OpportunitiesPage'
+import { SettingsPage } from './pages/SettingsPage'
 import './App.css'
 
-const APP_NAME = 'Personal Job Finder'
-const APP_VERSION = __APP_VERSION__
-
-type ConnectionState =
-  | { status: 'loading' }
-  | { status: 'connected'; health: HealthResponse }
-  | { status: 'unavailable'; message: string }
-
-function App() {
-  const [connection, setConnection] = useState<ConnectionState>({
-    status: 'loading',
-  })
-  // Bumped when source policy changes so the search panel re-evaluates
-  // eligibility against the backend instead of showing stale blockers.
-  const [policyVersion, setPolicyVersion] = useState(0)
-
-  useEffect(() => {
-    const controller = new AbortController()
-
-    fetchHealth(controller.signal)
-      .then((health) => {
-        setConnection({ status: 'connected', health })
-      })
-      .catch((error: unknown) => {
-        if (controller.signal.aborted) {
-          return
-        }
-
-        const message =
-          error instanceof Error ? error.message : 'Unknown connection error'
-        setConnection({ status: 'unavailable', message })
-      })
-
-    return () => controller.abort()
-  }, [])
-
+function NotFoundPage() {
   return (
-    <main className="app-shell">
-      <header className="app-header">
-        <p className="eyebrow">Local-first job discovery</p>
-        <h1>{APP_NAME}</h1>
-        <p className="version">Version {APP_VERSION}</p>
-      </header>
-
-      <section
-        className={`status-card status-${connection.status}`}
-        aria-live="polite"
-      >
-        {connection.status === 'loading' && (
-          <>
-            <h2>Connecting to the backend</h2>
-            <p>Checking backend connection…</p>
-          </>
-        )}
-
-        {connection.status === 'connected' && (
-          <>
-            <h2>Backend connected</h2>
-            <p>
-              {connection.health.service} is responding with version{' '}
-              {connection.health.version}.
-            </p>
-          </>
-        )}
-
-        {connection.status === 'unavailable' && (
-          <>
-            <h2>Backend unavailable</h2>
-            <p>
-              Start the API on <code>127.0.0.1:8000</code>, then reload this
-              page.
-            </p>
-            <p className="error-detail">{connection.message}</p>
-          </>
-        )}
+    <>
+      <PageHeader title="Page not found" />
+      <section className="settings-panel">
+        <p className="settings-empty">
+          That address does not match any page. Use the navigation to pick one
+          of the three destinations.
+        </p>
       </section>
-
-      <SearchRunPanel refreshToken={policyVersion} />
-
-      <CompanySources
-        onSourcePolicyChanged={() => setPolicyVersion((version) => version + 1)}
-      />
-
-      <TargetRolesSettings />
-
-      <footer className="app-footer">
-        <span>Loopback only</span>
-        <span>API: /api/v1</span>
-      </footer>
-    </main>
+    </>
   )
 }
 
-export default App
+export function AppRoutes() {
+  return (
+    <Routes>
+      <Route element={<AppShell />}>
+        <Route index element={<DashboardPage />} />
+        <Route path="opportunities" element={<OpportunitiesPage />} />
+        <Route path="opportunities/:opportunityId" element={<OpportunityDetailPage />} />
+        <Route path="settings" element={<SettingsPage />} />
+        <Route path="*" element={<NotFoundPage />} />
+      </Route>
+    </Routes>
+  )
+}
+
+export default function App() {
+  return (
+    <BrowserRouter>
+      <AppRoutes />
+    </BrowserRouter>
+  )
+}
