@@ -255,3 +255,35 @@ export async function fetchSearchRun(
 
   return readResponse(response, isSearchRunStatus)
 }
+
+/**
+ * The most recently accepted run, or `null` when no run has ever been
+ * accepted. `null` is a documented success response, not a missing record.
+ */
+export async function fetchLatestSearchRun(
+  signal?: AbortSignal,
+): Promise<SearchRunStatus | null> {
+  const response = await fetch('/api/v1/search-runs/latest', {
+    headers: { Accept: 'application/json' },
+    signal,
+  })
+
+  const payload = await readJson(response)
+
+  if (!response.ok) {
+    throw errorFromPayload(payload, response.status)
+  }
+
+  if (payload === null) {
+    return null
+  }
+
+  if (!isSearchRunStatus(payload)) {
+    throw new SearchRunsApiError(
+      'The latest search run endpoint returned an unexpected payload.',
+      { code: 'unexpected_payload', status: response.status },
+    )
+  }
+
+  return payload
+}

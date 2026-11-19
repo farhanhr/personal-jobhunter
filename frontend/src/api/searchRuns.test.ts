@@ -1,5 +1,6 @@
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import {
+  fetchLatestSearchRun,
   fetchSearchPolicy,
   fetchSearchRun,
   startSearchRun,
@@ -160,5 +161,81 @@ describe('searchRuns api', () => {
     )
 
     await expect(fetchSearchRun('run_abc')).rejects.toThrow(/unexpected payload/i)
+  })
+})
+
+describe('latest search run', () => {
+  afterEach(() => {
+    vi.unstubAllGlobals()
+    vi.restoreAllMocks()
+  })
+
+  it('returns null when no run has been accepted yet', async () => {
+    const fetchMock = vi.fn().mockResolvedValue(mockResponse(null))
+    vi.stubGlobal('fetch', fetchMock)
+
+    await expect(fetchLatestSearchRun()).resolves.toBeNull()
+    expect(fetchMock).toHaveBeenCalledWith(
+      '/api/v1/search-runs/latest',
+      expect.objectContaining({
+        headers: { Accept: 'application/json' },
+      }),
+    )
+  })
+
+  it('returns the latest run when one exists', async () => {
+    const run: SearchRunStatus = {
+      run_id: 'run_latest',
+      status: 'completed',
+      accepted_at_utc: '2026-11-18T01:00:00Z',
+      started_at_utc: '2026-11-18T01:00:05Z',
+      finished_at_utc: '2026-11-18T01:04:00Z',
+      operational_day: '2026-11-18',
+      progress: { stage: 'completed', completed_sources: 2, total_sources: 2 },
+      source_results: [],
+      error_summary: null,
+    }
+    vi.stubGlobal('fetch', vi.fn().mockResolvedValue(mockResponse(run)))
+
+    await expect(fetchLatestSearchRun()).resolves.toEqual(run)
+  })
+
+  it('forwards an abort signal', async () => {
+    const fetchMock = vi.fn().mockResolvedValue(mockResponse(null))
+    vi.stubGlobal('fetch', fetchMock)
+    const controller = new AbortController()
+
+    await fetchLatestSearchRun(controller.signal)
+
+    expect(fetchMock).toHaveBeenCalledWith(
+      '/api/v1/search-runs/latest',
+      expect.objectContaining({ signal: controller.signal }),
+    )
+  })
+
+  it('rejects a malformed latest run payload', async () => {
+    vi.stubGlobal(
+      'fetch',
+      vi.fn().mockResolvedValue(mockResponse({ run_id: 'run_latest' })),
+    )
+
+    await expect(fetchLatestSearchRun()).rejects.toThrow(/unexpected payload/i)
+  })
+
+  it('surfaces a failed latest run request', async () => {
+    vi.stubGlobal(
+      'fetch',
+      vi.fn().mockResolvedValue(
+        mockResponse(
+          { error: { code: 'run_not_found', message: 'No run.', details: {} } },
+          404,
+        ),
+      ),
+    )
+
+    await expect(fetchLatestSearchRun()).rejects.toMatchObject({
+      code: 'run_not_found',
+      status: 404,
+    })
   })
 })

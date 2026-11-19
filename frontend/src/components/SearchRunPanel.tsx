@@ -5,8 +5,11 @@ import {
   startSearchRun,
   type SearchPolicy,
   type SearchRunStatus,
-  type SourceRunResult,
 } from '../api/searchRuns'
+import { formatJakartaInstant as formatInstant } from '../lib/datetime'
+import { TERMINAL_STATUSES } from '../lib/searchRunStatus'
+import { AllowanceStrip } from './AllowanceStrip'
+import { RunStatusCard } from './RunStatusCard'
 
 type PolicyState =
   | { status: 'loading' }
@@ -35,24 +38,6 @@ type SearchRunPanelProps = {
 const DEFAULT_POLL_INTERVAL_MS = 1_000
 const DEFAULT_MAX_POLL_ATTEMPTS = 120
 
-const TERMINAL_STATUSES = new Set([
-  'completed',
-  'completed_with_warnings',
-  'completed_pending_sync',
-  'failed',
-  'interrupted',
-])
-
-const STATUS_LABELS: Record<string, string> = {
-  accepted: 'Accepted',
-  running: 'Running',
-  completed: 'Completed',
-  completed_with_warnings: 'Completed with warnings',
-  completed_pending_sync: 'Completed, waiting for sync',
-  failed: 'Failed',
-  interrupted: 'Interrupted',
-}
-
 const BLOCKER_LABELS: Record<string, string> = {
   no_target_roles: 'Add at least one primary target role.',
   too_many_target_roles: 'Keep at most three primary target roles.',
@@ -72,11 +57,6 @@ function createIdempotencyKey(): string {
     return crypto.randomUUID()
   }
   throw new Error('This browser cannot generate a secure idempotency key.')
-}
-
-function formatInstant(value: string): string {
-  const parsed = new Date(value)
-  return Number.isNaN(parsed.getTime()) ? value : parsed.toLocaleString()
 }
 
 export function SearchRunPanel({
@@ -236,10 +216,10 @@ export function SearchRunPanel({
   return (
     <section className="search-panel" aria-labelledby="search-runs-heading">
       <div className="settings-heading">
-        <h2 id="search-runs-heading">Manual search</h2>
+        <h2 id="search-runs-heading">Search allowance</h2>
         <p>
-          A search starts only when you click Start Search. The backend enforces
-          the two-run daily quota and the 12-hour cooldown.
+          Two searches a day, at least twelve hours apart. The backend decides
+          whether a search can start; this page only reports that decision.
         </p>
       </div>
 
@@ -266,24 +246,10 @@ export function SearchRunPanel({
         </div>
       )}
 
+      {policy && <AllowanceStrip policy={policy} />}
+
       {policy && (
         <>
-          <div className="policy-summary">
-            <p>
-              <strong>{policy.remaining_runs}</strong> of {policy.max_runs} runs
-              remaining for {policy.operational_day} ({policy.timezone}).
-            </p>
-            {policy.cooldown_until && (
-              <p>
-                Cooldown ends at{' '}
-                <time dateTime={policy.cooldown_until}>
-                  {formatInstant(policy.cooldown_until)}
-                </time>
-                .
-              </p>
-            )}
-          </div>
-
           {!policy.can_start && (
             <div className="settings-alert settings-alert-warning" role="status">
               <h3>Search cannot start yet</h3>
@@ -367,87 +333,3 @@ export function SearchRunPanel({
   )
 }
 
-function RunStatusCard({
-  run,
-  pollingStopped,
-}: {
-  run: SearchRunStatus
-  pollingStopped: boolean
-}) {
-  const label = STATUS_LABELS[run.status] ?? run.status
-  const terminal = TERMINAL_STATUSES.has(run.status)
-
-  return (
-    <div className="run-status-card">
-      <h3>Run {run.run_id}</h3>
-      <p className="run-status" aria-live="polite">
-        Status: <strong>{label}</strong>
-      </p>
-
-      {run.progress && (
-        <p>
-          {run.progress.completed_sources} of {run.progress.total_sources}{' '}
-          configured sources completed successfully.
-        </p>
-      )}
-
-      {run.error_summary && (
-        <p className="error-detail" role="alert">
-          {run.error_summary}
-        </p>
-      )}
-
-      {run.source_results.length > 0 && (
-        <ul className="source-results">
-          {run.source_results.map((result) => (
-            <SourceResultItem
-              key={`${result.source_id}-${result.status}`}
-              result={result}
-            />
-          ))}
-        </ul>
-      )}
-
-      {terminal && (
-        <p className="field-hint">
-          This run is finished and its accepted quota remains consumed.
-        </p>
-      )}
-
-      {pollingStopped && (
-        <p className="settings-note">
-          Status polling stopped after the configured limit. Reload the page to
-          check the latest state.
-        </p>
-      )}
-    </div>
-  )
-}
-
-function SourceResultItem({ result }: { result: SourceRunResult }) {
-  const hasCounters =
-    result.records_relevant !== undefined ||
-    result.records_filtered !== undefined ||
-    result.records_invalid !== undefined
-
-  return (
-    <li>
-      <strong>{result.source_id}</strong>: {result.status},{' '}
-      {result.records_found} record{result.records_found === 1 ? '' : 's'} found
-      {result.error_code ? ` (${result.error_code})` : ''}.
-      {hasCounters && (
-        <span className="source-counters">
-          {result.records_relevant !== undefined && (
-            <> {result.records_relevant} matched your target roles.</>
-          )}
-          {result.records_filtered !== undefined && (
-            <> {result.records_filtered} filtered out by role or location.</>
-          )}
-          {result.records_invalid !== undefined && result.records_invalid > 0 && (
-            <> {result.records_invalid} unusable entries skipped.</>
-          )}
-        </span>
-      )}
-    </li>
-  )
-}
