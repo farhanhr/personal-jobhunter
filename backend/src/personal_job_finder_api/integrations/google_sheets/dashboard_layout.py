@@ -1,6 +1,6 @@
-"""Pure layout and formula definitions for the optional spreadsheet Dashboard.
+"""Pure layout and formula definitions for the optional ``Metrics`` board.
 
-The Dashboard tab is a companion view, never a canonical store. This module
+The Metrics tab is a companion view, never a canonical store. This module
 holds only text: labels, addresses, formula strings, and Google API request
 dictionaries. It imports nothing from the transport, the database, or the
 service layer, so the whole layout can be golden-tested without a network.
@@ -80,20 +80,20 @@ def resolve_formula_dialect(locale: str) -> FormulaDialect | None:
     return FORMULA_DIALECTS.get(canonical)
 
 
-DASHBOARD_TAB: Final = "Dashboard"
+METRICS_TAB: Final = "Metrics"
 #: Bumped when the written layout changes incompatibly. V1 used a last-row helper
 #: that evaluated to its fallback in Google Sheets, so every metric range was
 #: pinned to row 2; V2 replaces it with a live-verified FILTER-based helper. An
 #: existing V1 tab is refused rather than silently trusted with wrong numbers.
-DASHBOARD_SENTINEL: Final = "PJF_DASHBOARD_V2"
-DASHBOARD_SENTINEL_PREFIX: Final = "PJF_DASHBOARD_"
+METRICS_SENTINEL: Final = "PJF_DASHBOARD_V2"
+METRICS_SENTINEL_PREFIX: Final = "PJF_DASHBOARD_"
 DASHBOARD_TIMEZONE: Final = "Asia/Jakarta"
 SENTINEL_CELL: Final = "M1"
 
 #: Whole-tab inspection target. A bare sheet name addresses the entire sheet, so
 #: no fixed row or column boundary is assumed when deciding whether an existing
-#: Dashboard tab is empty.
-INSPECT_RANGE: Final = DASHBOARD_TAB
+#: Metrics tab is empty.
+INSPECT_RANGE: Final = METRICS_TAB
 
 #: Mirror of ``personal_job_finder_api.db.tables.SOURCE_TYPE_VALUES``. Kept as a
 #: literal so this module stays dependency-free; a test pins the parity.
@@ -170,15 +170,18 @@ class DashboardCell:
 # --------------------------------------------------------------------- ranges
 
 
-def _opportunities_range(column: str) -> str:
+def _opportunities_range(column: str, bound: str = "$H$1") -> str:
     """A bounded Opportunities range that survives an interior blank row.
 
-    The upper bound comes from the ``H1`` helper, which finds the last row that
+    The upper bound comes from a helper cell, which finds the last row that
     actually holds a key rather than counting non-blank cells. ``COUNTA`` would
     silently truncate every row after the first interior blank key cell.
+
+    ``bound`` is configurable so a second sheet can carry its own helper instead
+    of depending on this one's.
     """
 
-    return f"Opportunities!${column}$2:INDEX(Opportunities!${column}:${column}{ARG}$H$1)"
+    return f"Opportunities!${column}$2:INDEX(Opportunities!${column}:${column}{ARG}{bound})"
 
 
 def _sources_range(column: str) -> str:
@@ -434,7 +437,7 @@ def visible_cells(dialect: FormulaDialect = DEFAULT_DIALECT) -> tuple[DashboardC
     cells: list[DashboardCell] = [
         _cell(
             "A1",
-            "Job Search Dashboard — formula-only view, not a source of truth",
+            "Job Search Metrics — formula-only view, not a source of truth",
         ),
         _cell("A2", "As of (Asia/Jakarta)"),
         _cell("B2", _AS_OF_FORMULA),
@@ -521,7 +524,7 @@ def all_cells(dialect: FormulaDialect = DEFAULT_DIALECT) -> tuple[DashboardCell,
 def sentinel_cell() -> DashboardCell:
     """The ownership marker, written last so partial work is not mistaken for done."""
 
-    return _cell(SENTINEL_CELL, DASHBOARD_SENTINEL)
+    return _cell(SENTINEL_CELL, METRICS_SENTINEL)
 
 
 def build_initialization_requests(

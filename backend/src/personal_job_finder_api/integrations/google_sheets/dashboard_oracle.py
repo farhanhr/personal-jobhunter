@@ -91,6 +91,7 @@ class OpportunityRow:
 
     opportunity_id: str
     location_status: str | None = None
+    user_status: str | None = None
     first_seen_at_utc: str | None = None
     date_applied: str | None = None
     application_status: str | None = None
@@ -191,6 +192,9 @@ def opportunity_rows(rows: Iterable[Mapping[str, Any]]) -> tuple[OpportunityRow,
                     None
                     if row.get("location_status") is None
                     else _text(row.get("location_status"))
+                ),
+                user_status=(
+                    None if row.get("user_status") is None else _text(row.get("user_status"))
                 ),
                 first_seen_at_utc=(
                     None
@@ -383,3 +387,74 @@ def header_only(*, as_of: date) -> ExpectedMetrics:
     """Expected values when both canonical tabs hold only their header row."""
 
     return compute((), (), as_of=as_of)
+
+
+# ------------------------------------------------------------- workspace cards
+
+#: Card cells in the order the cards are laid out.
+CARD_CELLS: tuple[str, ...] = ("B3", "B4", "B5", "B6", "B7", "B8")
+
+ARCHIVED_USER_STATUS = "ignored"
+EXCLUDED_LOCATION_STATUS = "excluded"
+
+
+def _is_active(row: OpportunityRow) -> bool:
+    """A row still in the pipeline: not excluded and not archived."""
+
+    return (
+        row.location_status != EXCLUDED_LOCATION_STATUS and row.user_status != ARCHIVED_USER_STATUS
+    )
+
+
+def _is_archived(row: OpportunityRow) -> bool:
+    return (
+        row.location_status == EXCLUDED_LOCATION_STATUS or row.user_status == ARCHIVED_USER_STATUS
+    )
+
+
+def compute_cards(
+    opportunities: Sequence[OpportunityRow],
+    *,
+    as_of: date,
+) -> ExpectedMetrics:
+    """Compute the six ``Dashboard`` cards independently of the formulas.
+
+    This deliberately does not import the card builder: an expectation derived
+    from the formula under test would agree with its bugs.
+    """
+
+    application_start = as_of - timedelta(days=APPLICATION_WINDOW_DAYS - 1)
+    application_end = as_of
+    interview_start = as_of
+    interview_end = as_of + timedelta(days=INTERVIEW_WINDOW_DAYS)
+
+    def need_to_apply(row: OpportunityRow) -> bool:
+        if not _is_active(row):
+            return False
+        return normalize_status(row.application_status) in ("", "need to apply")
+
+    def applied(row: OpportunityRow) -> bool:
+        if not _is_active(row):
+            return False
+        parsed, _ = _tracker_date(row.date_applied)
+        return parsed is not None and application_start <= parsed <= application_end
+
+    def interviewing(row: OpportunityRow) -> bool:
+        if not _is_active(row):
+            return False
+        parsed, _ = _tracker_date(row.interview_date)
+        return parsed is not None and interview_start <= parsed <= interview_end
+
+    def offers(row: OpportunityRow) -> bool:
+        return _is_active(row) and normalize_status(row.application_status) == "offer"
+
+    values: dict[str, int | str] = {
+        "B2": as_of.isoformat(),
+        "B3": _distinct_ids((row.opportunity_id, need_to_apply(row)) for row in opportunities),
+        "B4": _distinct_ids((row.opportunity_id, applied(row)) for row in opportunities),
+        "B5": _distinct_ids((row.opportunity_id, interviewing(row)) for row in opportunities),
+        "B6": _distinct_ids((row.opportunity_id, offers(row)) for row in opportunities),
+        "B7": _distinct_ids((row.opportunity_id, _is_active(row)) for row in opportunities),
+        "B8": _distinct_ids((row.opportunity_id, _is_archived(row)) for row in opportunities),
+    }
+    return ExpectedMetrics(values=values)

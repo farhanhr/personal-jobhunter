@@ -13,6 +13,7 @@ from typing import Any
 
 from personal_job_finder_api.integrations.google_sheets import dashboard_layout as layout
 from personal_job_finder_api.integrations.google_sheets import dashboard_verify as verify
+from personal_job_finder_api.integrations.google_sheets import workspace_layout as cards_layout
 from personal_job_finder_api.integrations.google_sheets.client import (
     GridCell,
     SheetProperties,
@@ -21,6 +22,9 @@ from personal_job_finder_api.integrations.google_sheets.client import (
 from personal_job_finder_api.integrations.google_sheets.config import (
     JOB_SOURCE_HEADERS,
     OPPORTUNITY_HEADERS,
+)
+from personal_job_finder_api.integrations.google_sheets.dashboard_verify import (
+    CARD_CELLS,
 )
 
 AS_OF = date(2026, 11, 20)
@@ -44,10 +48,12 @@ class FakeClient:
         opportunities: list[list[str]] | None = None,
         sources: list[list[str]] | None = None,
         cells: dict[str, GridCell] | None = None,
-        sentinel: str = layout.DASHBOARD_SENTINEL,
+        sentinel: str = layout.METRICS_SENTINEL,
         time_zone: str | None = "Asia/Jakarta",
         locale: str | None = "in_ID",
-        tabs: tuple[str, ...] = ("Opportunities", "Job_Sources", "Dashboard", "Sheet1"),
+        tabs: tuple[str, ...] = ("Opportunities", "Job_Sources", layout.METRICS_TAB, "Sheet1"),
+        cards: bool = False,
+        cards_sentinel: str = cards_layout.DASHBOARD_SENTINEL,
     ) -> None:
         self._opportunities = opportunities or [list(OPPORTUNITY_HEADERS)]
         self._sources = sources or [list(JOB_SOURCE_HEADERS)]
@@ -56,14 +62,22 @@ class FakeClient:
         self._time_zone = time_zone
         self._locale = locale
         self._tabs = tabs
+        self._cards_enabled = cards
+        self._cards_sentinel = cards_sentinel
+        self._cards = {
+            address: GridCell(address=address, formula="=0", value="0") for address in CARD_CELLS
+        }
         self.grid_ranges: list[str] = []
 
     def get_metadata(self, spreadsheet_id: str) -> SpreadsheetMetadata:
+        titles = self._tabs
+        if self._cards_enabled and cards_layout.DASHBOARD_TAB not in titles:
+            titles = (*titles, cards_layout.DASHBOARD_TAB)
         return SpreadsheetMetadata(
-            titles=self._tabs,
+            titles=titles,
             time_zone=self._time_zone,
             locale=self._locale,
-            sheets=tuple(SheetProperties(title=title) for title in self._tabs),
+            sheets=tuple(SheetProperties(title=title) for title in titles),
         )
 
     def get_values(
@@ -89,10 +103,21 @@ class FakeClient:
         ranges: list[str],
     ) -> dict[str, list[list[GridCell]]]:
         self.grid_ranges = list(ranges)
-        cells = dict(self._cells)
-        cells[layout.SENTINEL_CELL] = GridCell(address=layout.SENTINEL_CELL, literal=self._sentinel)
-        ordered = sorted(cells, key=lambda value: (value[0], int(value[1:])))
-        return {requested: [[cells[address] for address in ordered]] for requested in ranges}
+        result: dict[str, list[list[GridCell]]] = {}
+        for requested in ranges:
+            if requested.startswith(cards_layout.DASHBOARD_TAB):
+                cells = dict(self._cards)
+                cells[cards_layout.SENTINEL_CELL] = GridCell(
+                    address=cards_layout.SENTINEL_CELL, literal=self._cards_sentinel
+                )
+            else:
+                cells = dict(self._cells)
+                cells[layout.SENTINEL_CELL] = GridCell(
+                    address=layout.SENTINEL_CELL, literal=self._sentinel
+                )
+            ordered = sorted(cells, key=lambda value: (value[0], int(value[1:])))
+            result[requested] = [[cells[address] for address in ordered]]
+        return result
 
 
 def _all_zero_cells() -> dict[str, GridCell]:
@@ -129,7 +154,7 @@ def test_every_metric_is_read_in_one_bounding_range() -> None:
     _verify(client)
 
     # The sentinel sits in column M, so the rectangle reaches it in the same read.
-    assert client.grid_ranges == ["Dashboard!A1:M34"]
+    assert client.grid_ranges == [f"{layout.METRICS_TAB}!A1:M34"]
 
 
 def test_a_formula_error_is_reported_as_a_failure_not_a_write_success() -> None:
@@ -207,7 +232,7 @@ def test_a_missing_dashboard_tab_is_a_problem_not_a_crash() -> None:
     report = _verify(FakeClient(tabs=("Opportunities", "Job_Sources")))
 
     assert report.checks == ()
-    assert any("Dashboard tab does not exist" in problem for problem in report.problems)
+    assert any("Neither the Dashboard" in problem for problem in report.problems)
     assert not report.ok
 
 
@@ -242,3 +267,41 @@ def test_the_verify_module_never_writes() -> None:
     _verify(client)
 
     assert not hasattr(client, "batch_update")
+
+
+# --------------------------------------------------------------- cards tab
+
+
+def test_the_cards_tab_is_verified_against_the_card_oracle() -> None:
+    cells = _all_zero_cells()
+    client = FakeClient(cells=cells, cards=True)
+
+    report = _verify(client)
+
+    card_checks = [check for check in report.checks if check.tab == cards_layout.DASHBOARD_TAB]
+    assert len(card_checks) == len(CARD_CELLS)
+    assert {check.address for check in card_checks} == set(CARD_CELLS)
+    assert report.ok, report.failures
+
+
+def test_a_card_that_disagrees_is_reported() -> None:
+    cells = _all_zero_cells()
+    client = FakeClient(cells=cells, cards=True)
+    client._cards["B7"] = GridCell(address="B7", formula="=99", value="99")
+
+    report = _verify(client)
+
+    failing = {
+        check.address: check for check in report.failures if check.tab == cards_layout.DASHBOARD_TAB
+    }
+    assert failing["B7"].expected == 0
+    assert failing["B7"].actual == "99"
+
+
+def test_a_cards_tab_without_a_sentinel_is_reported() -> None:
+    client = FakeClient(cells=_all_zero_cells(), cards=True, cards_sentinel="")
+
+    report = _verify(client)
+
+    assert any("cards sentinel" in problem for problem in report.problems)
+    assert not report.ok

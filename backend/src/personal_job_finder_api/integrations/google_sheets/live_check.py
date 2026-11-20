@@ -673,7 +673,7 @@ class ScenarioRun:
         for check in self.failures:
             suffix = f" error={check.error}" if check.error else ""
             details.append(
-                f"  {check.address}: expected {check.expected!r}, "
+                f"  {check.label}: expected {check.expected!r}, "
                 f"actual {check.actual!r} ({check.status}){suffix}"
             )
         return "\n".join(details)

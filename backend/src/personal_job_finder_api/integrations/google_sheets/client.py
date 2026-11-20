@@ -99,6 +99,14 @@ class SheetProperties:
 
     title: str
     sheet_id: int | None = None
+    #: Native table ids on this sheet. Empty when the sheet has no table, which is
+    #: also what a minimal provider response or a test fake reports.
+    table_ids: tuple[str, ...] = ()
+    #: Frozen pane counts. Repair compares these so a healthy sheet is left alone.
+    frozen_row_count: int = 0
+    frozen_column_count: int = 0
+    #: Total rows in the grid. A native table cannot exceed it.
+    row_count: int = 0
 
 
 @dataclass(frozen=True, slots=True)
@@ -121,6 +129,18 @@ class SpreadsheetMetadata:
         for sheet in self.sheets:
             if sheet.title == title:
                 return sheet.sheet_id
+        return None
+
+    def table_ids_for(self, title: str) -> tuple[str, ...]:
+        for sheet in self.sheets:
+            if sheet.title == title:
+                return sheet.table_ids
+        return ()
+
+    def sheet_properties_for(self, title: str) -> SheetProperties | None:
+        for sheet in self.sheets:
+            if sheet.title == title:
+                return sheet
         return None
 
 
@@ -212,7 +232,43 @@ class GoogleSheetsClient:
                 if isinstance(raw_sheet_id, bool) or not isinstance(raw_sheet_id, int):
                     raise _malformed_response()
                 sheet_id = raw_sheet_id
-            parsed.append(SheetProperties(title=title, sheet_id=sheet_id))
+            grid_properties = sheet_properties.get("gridProperties") or {}
+            if not isinstance(grid_properties, dict):
+                raise _malformed_response()
+            frozen_row_count = grid_properties.get("frozenRowCount") or 0
+            frozen_column_count = grid_properties.get("frozenColumnCount") or 0
+            if isinstance(frozen_row_count, bool) or not isinstance(frozen_row_count, int):
+                raise _malformed_response()
+            if isinstance(frozen_column_count, bool) or not isinstance(frozen_column_count, int):
+                raise _malformed_response()
+            row_count = grid_properties.get("rowCount") or 0
+            if isinstance(row_count, bool) or not isinstance(row_count, int):
+                raise _malformed_response()
+
+            table_ids: list[str] = []
+            raw_tables = sheet.get("tables")
+            if raw_tables is not None:
+                if not isinstance(raw_tables, list):
+                    raise _malformed_response()
+                for table in raw_tables:
+                    if not isinstance(table, dict):
+                        raise _malformed_response()
+                    table_id = table.get("tableId")
+                    if table_id is None:
+                        continue
+                    if not isinstance(table_id, str):
+                        raise _malformed_response()
+                    table_ids.append(table_id)
+            parsed.append(
+                SheetProperties(
+                    title=title,
+                    sheet_id=sheet_id,
+                    table_ids=tuple(table_ids),
+                    frozen_row_count=frozen_row_count,
+                    frozen_column_count=frozen_column_count,
+                    row_count=row_count,
+                )
+            )
 
         return SpreadsheetMetadata(
             titles=tuple(sheet.title for sheet in parsed),
@@ -726,9 +782,16 @@ class GoogleApiSheetsTransport:
         self._service = service
 
     def get_spreadsheet(self, spreadsheet_id: str) -> dict[str, Any]:
+        # ``tables`` is a sibling of ``properties`` on a Sheet, and the provider
+        # omits it unless the field mask asks for it. Without it, repair cannot
+        # tell an existing native table from a missing one.
         request = self._service.spreadsheets().get(
             spreadsheetId=spreadsheet_id,
             includeGridData=False,
+            fields=(
+                "properties(timeZone,locale),"
+                "sheets(properties(sheetId,title,gridProperties,index,sheetType),tables)"
+            ),
         )
         return self._execute(request)
 

@@ -12,6 +12,7 @@ from datetime import date
 
 from personal_job_finder_api.integrations.google_sheets import dashboard_layout as layout
 from personal_job_finder_api.integrations.google_sheets import dashboard_oracle as oracle
+from personal_job_finder_api.integrations.google_sheets import workspace_layout as layout_cards
 
 AS_OF = date(2026, 11, 20)
 
@@ -426,3 +427,136 @@ def test_the_oracle_covers_every_metric_cell_the_layout_writes() -> None:
 
     assert metric_addresses == computed - {"J1"}
     assert "J1" in computed
+
+
+# ------------------------------------------------------------------- cards
+
+
+def _cards(rows, as_of=AS_OF):
+    return oracle.compute_cards(oracle.opportunity_rows(rows), as_of=as_of)
+
+
+def test_cards_are_all_zero_without_rows() -> None:
+    metrics = _cards([])
+
+    for address in oracle.CARD_CELLS:
+        assert metrics[address] == 0, address
+
+
+def test_a_blank_status_is_need_to_apply() -> None:
+    metrics = _cards([{"opportunity_id": "opp-1", "application_status": ""}])
+
+    assert metrics["B3"] == 1
+    assert metrics["B7"] == 1
+
+
+def test_the_literal_need_to_apply_status_counts_too() -> None:
+    metrics = _cards([{"opportunity_id": "opp-1", "application_status": "Need to Apply"}])
+
+    assert metrics["B3"] == 1
+
+
+def test_need_to_apply_and_blank_are_not_double_counted() -> None:
+    metrics = _cards(
+        [
+            {"opportunity_id": "opp-1", "application_status": ""},
+            {"opportunity_id": "opp-2", "application_status": "Need to Apply"},
+        ]
+    )
+
+    assert metrics["B3"] == 2
+
+
+def test_an_archived_row_leaves_the_active_pipeline() -> None:
+    metrics = _cards(
+        [
+            {"opportunity_id": "opp-1", "user_status": "ignored"},
+            {"opportunity_id": "opp-2"},
+        ]
+    )
+
+    assert metrics["B7"] == 1
+    assert metrics["B8"] == 1
+
+
+def test_an_excluded_row_counts_as_archived() -> None:
+    metrics = _cards([{"opportunity_id": "opp-1", "location_status": "excluded"}])
+
+    assert metrics["B7"] == 0
+    assert metrics["B8"] == 1
+
+
+def test_an_archived_row_is_never_need_to_apply() -> None:
+    metrics = _cards([{"opportunity_id": "opp-1", "user_status": "ignored"}])
+
+    assert metrics["B3"] == 0
+
+
+def test_applied_counts_only_the_last_seven_jakarta_dates() -> None:
+    metrics = _cards(
+        [
+            {"opportunity_id": "in", "date_applied": "2026-11-20"},
+            {"opportunity_id": "start", "date_applied": "2026-11-14"},
+            {"opportunity_id": "early", "date_applied": "2026-11-13"},
+            {"opportunity_id": "future", "date_applied": "2026-11-21"},
+        ]
+    )
+
+    assert metrics["B4"] == 2
+
+
+def test_interviews_look_from_today_to_today_plus_seven() -> None:
+    metrics = _cards(
+        [
+            {"opportunity_id": "today", "interview_date": "2026-11-20"},
+            {"opportunity_id": "last", "interview_date": "2026-11-27"},
+            {"opportunity_id": "past", "interview_date": "2026-11-19"},
+            {"opportunity_id": "far", "interview_date": "2026-11-28"},
+        ]
+    )
+
+    assert metrics["B5"] == 2
+
+
+def test_offers_counts_the_offer_status_case_insensitively() -> None:
+    metrics = _cards(
+        [
+            {"opportunity_id": "opp-1", "application_status": "Offer"},
+            {"opportunity_id": "opp-2", "application_status": " offer "},
+            {"opportunity_id": "opp-3", "application_status": "Applied"},
+        ]
+    )
+
+    assert metrics["B6"] == 2
+
+
+def test_duplicate_ids_count_once_per_card() -> None:
+    metrics = _cards(
+        [
+            {"opportunity_id": "opp-1", "application_status": "Offer"},
+            {"opportunity_id": "opp-1", "application_status": "Offer"},
+        ]
+    )
+
+    assert metrics["B6"] == 1
+    assert metrics["B7"] == 1
+
+
+def test_the_cards_cover_exactly_the_layout_cells() -> None:
+    assert set(oracle.CARD_CELLS) == set(layout_cards.CARD_CELLS)
+
+
+def test_an_archived_row_is_never_new_or_offered() -> None:
+    metrics = _cards(
+        [
+            {
+                "opportunity_id": "opp-1",
+                "user_status": "ignored",
+                "application_status": "Offer",
+                "date_applied": "2026-11-20",
+            }
+        ]
+    )
+
+    assert metrics["B4"] == 0
+    assert metrics["B6"] == 0

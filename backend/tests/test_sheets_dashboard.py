@@ -7,6 +7,7 @@ formula execution.
 
 from __future__ import annotations
 
+import re
 from types import SimpleNamespace
 from typing import Any
 
@@ -19,8 +20,8 @@ from personal_job_finder_api.integrations.google_sheets.config import (
     OPPORTUNITY_HEADERS,
 )
 from personal_job_finder_api.integrations.google_sheets.dashboard import (
-    DashboardInitService,
-    DashboardInitState,
+    MetricsInitService,
+    MetricsInitState,
 )
 from personal_job_finder_api.integrations.google_sheets.errors import GoogleSheetsError
 from personal_job_finder_api.integrations.google_sheets.preflight import (
@@ -88,10 +89,8 @@ class DashboardTransport:
         self.calls.append("batch_get_values")
         value_ranges: list[dict[str, Any]] = []
         for requested in ranges:
-            tab = requested.split("!", 1)[0]
-            rows = self.tabs.get(tab, [])
-            if requested.endswith("!1:1"):
-                rows = rows[:1]
+            tab, _, a1 = requested.partition("!")
+            rows = _slice_a1(self.tabs.get(tab, []), a1)
             value_ranges.append({"values": [list(row) for row in rows]} if rows else {})
         return {"valueRanges": value_ranges}
 
@@ -107,9 +106,10 @@ class DashboardTransport:
             raise AssertionError("only the FORMULA render is exercised by these tests")
         value_ranges: list[dict[str, Any]] = []
         for requested in ranges:
-            tab = requested.split("!", 1)[0]
+            tab, _, a1 = requested.partition("!")
             used = _used_block(self.tabs.get(tab, []))
-            value_ranges.append({"values": used} if used else {})
+            sliced = _slice_a1(used, a1)
+            value_ranges.append({"values": sliced} if sliced else {})
         return {"valueRanges": value_ranges}
 
     def batch_update_values(
@@ -148,6 +148,8 @@ class DashboardTransport:
                 self.tabs[title] = []
                 self.sheet_ids[title] = self._next_sheet_id
                 self._next_sheet_id += 1
+            elif "updateSheetProperties" in request:
+                self._apply_sheet_properties(request["updateSheetProperties"])
             elif "updateCells" in request:
                 self._apply_cells(request["updateCells"])
         if is_layout_batch:
@@ -157,6 +159,23 @@ class DashboardTransport:
             self.fail_after_apply = False
             raise GoogleSheetsError("transport_uncertain", "simulated lost response")
         return {}
+
+    def _apply_sheet_properties(self, body: dict[str, Any]) -> None:
+        """Model a title rename, which moves the tab and keeps its content."""
+
+        properties = body.get("properties", {})
+        sheet_id = properties.get("sheetId")
+        new_title = properties.get("title")
+        if sheet_id is None or new_title is None:
+            return
+        for title, value in list(self.sheet_ids.items()):
+            if value != sheet_id:
+                continue
+            rows = self.tabs.pop(title, [])
+            self.sheet_ids.pop(title, None)
+            self.tabs[new_title] = rows
+            self.sheet_ids[new_title] = sheet_id
+            return
 
     def _apply_cells(self, body: dict[str, Any]) -> None:
         sheet_id = body["start"]["sheetId"]
@@ -194,6 +213,51 @@ def _validate_requests(requests: list[dict[str, Any]]) -> None:
             raise GoogleSheetsError("invalid_request", "simulated missing sheetId")
 
 
+_A1_PART = re.compile(r"^\$?([A-Za-z]*)\$?(\d*)$")
+
+
+def _column_number(letters: str) -> int:
+    """Convert column letters to a 1-based index."""
+
+    value = 0
+    for character in letters.upper():
+        value = value * 26 + (ord(character) - ord("A") + 1)
+    return value
+
+
+def _slice_a1(rows: list[list[str]], a1: str) -> list[list[str]]:
+    """Return the requested rectangle, as a real values read would.
+
+    The fake used to ignore the A1 part and answer with the whole tab, which
+    hid bugs in callers that read one cell. It now slices, so a caller asking
+    for ``M1`` receives one cell.
+    """
+
+    if not a1:
+        return rows
+    parts = a1.split(":")
+    start = _A1_PART.match(parts[0].strip())
+    end = _A1_PART.match(parts[-1].strip()) if len(parts) > 1 else start
+    if start is None or end is None:
+        return rows
+
+    start_column, start_row = start.group(1), start.group(2)
+    end_column, end_row = end.group(1), end.group(2)
+    first_row = int(start_row) if start_row else 1
+    last_row = int(end_row) if end_row else len(rows)
+    first_column = _column_number(start_column) if start_column else 1
+    last_column = _column_number(end_column) if end_column else None
+
+    sliced: list[list[str]] = []
+    for row_number in range(first_row, min(last_row, len(rows)) + 1):
+        row = rows[row_number - 1]
+        if last_column is None:
+            sliced.append(list(row[first_column - 1 :]))
+        else:
+            sliced.append(list(row[first_column - 1 : last_column]))
+    return sliced
+
+
 def _used_block(rows: list[list[str]]) -> list[list[str]]:
     """Trim trailing empty rows and cells, as a whole-tab values read does."""
 
@@ -212,18 +276,21 @@ def _spreadsheet(
     *,
     time_zone: str | None = "Asia/Jakarta",
     dashboard: list[list[str]] | None = None,
+    legacy_dashboard: list[list[str]] | None = None,
 ) -> DashboardTransport:
     tabs: dict[str, list[list[str]]] = {
         "Opportunities": [list(OPPORTUNITY_HEADERS)],
         "Job_Sources": [list(JOB_SOURCE_HEADERS)],
     }
     if dashboard is not None:
-        tabs["Dashboard"] = dashboard
+        tabs[layout.METRICS_TAB] = dashboard
+    if legacy_dashboard is not None:
+        tabs["Dashboard"] = legacy_dashboard
     return DashboardTransport(time_zone=time_zone, tabs=tabs)
 
 
-def _service(transport: DashboardTransport) -> DashboardInitService:
-    return DashboardInitService(
+def _service(transport: DashboardTransport) -> MetricsInitService:
+    return MetricsInitService(
         GoogleSheetsClient(transport),
         SPREADSHEET_ID,
     )
@@ -231,7 +298,7 @@ def _service(transport: DashboardTransport) -> DashboardInitService:
 
 def _cell(transport: DashboardTransport, address: str) -> str:
     row, column = layout.parse_address(address)
-    grid = transport.tabs["Dashboard"]
+    grid = transport.tabs[layout.METRICS_TAB]
     if row >= len(grid) or column >= len(grid[row]):
         return ""
     return grid[row][column]
@@ -239,7 +306,7 @@ def _cell(transport: DashboardTransport, address: str) -> str:
 
 def _sentinel_grid() -> list[list[str]]:
     row = [""] * 12
-    row.append(layout.DASHBOARD_SENTINEL)
+    row.append(layout.METRICS_SENTINEL)
     return [row]
 
 
@@ -251,11 +318,11 @@ def test_a_missing_dashboard_is_created_and_initialized() -> None:
 
     result = _service(transport).initialize()
 
-    assert result.state is DashboardInitState.CREATED
-    assert "Dashboard" in transport.tabs
-    assert _cell(transport, "M1") == layout.DASHBOARD_SENTINEL
+    assert result.state is MetricsInitState.CREATED
+    assert layout.METRICS_TAB in transport.tabs
+    assert _cell(transport, "M1") == layout.METRICS_SENTINEL
     assert _cell(transport, "B6").startswith("=IF(SUMPRODUCT(")
-    assert _cell(transport, "A1").startswith("Job Search Dashboard")
+    assert _cell(transport, "A1").startswith("Job Search Metrics")
     assert "batch_update_values" not in transport.calls
 
 
@@ -317,8 +384,8 @@ def test_an_empty_dashboard_tab_is_initialized() -> None:
 
     result = _service(transport).initialize()
 
-    assert result.state is DashboardInitState.INITIALIZED
-    assert _cell(transport, "M1") == layout.DASHBOARD_SENTINEL
+    assert result.state is MetricsInitState.INITIALIZED
+    assert _cell(transport, "M1") == layout.METRICS_SENTINEL
 
 
 def test_a_dashboard_with_only_blank_cells_counts_as_empty() -> None:
@@ -326,7 +393,7 @@ def test_a_dashboard_with_only_blank_cells_counts_as_empty() -> None:
 
     result = _service(transport).initialize()
 
-    assert result.state is DashboardInitState.INITIALIZED
+    assert result.state is MetricsInitState.INITIALIZED
 
 
 # --------------------------------------------------------------------- state C
@@ -337,7 +404,7 @@ def test_an_initialized_dashboard_is_a_no_op() -> None:
 
     result = _service(transport).initialize()
 
-    assert result.state is DashboardInitState.ALREADY_INITIALIZED
+    assert result.state is MetricsInitState.ALREADY_INITIALIZED
     assert transport.updates == []
 
 
@@ -418,7 +485,7 @@ def test_a_missing_time_zone_is_refused_before_any_write() -> None:
 
     assert captured.value.code == "dashboard_timezone_missing"
     assert transport.updates == []
-    assert "Dashboard" not in transport.tabs
+    assert layout.METRICS_TAB not in transport.tabs
 
 
 def test_an_incorrect_time_zone_is_refused_before_any_write() -> None:
@@ -429,7 +496,7 @@ def test_an_incorrect_time_zone_is_refused_before_any_write() -> None:
 
     assert captured.value.code == "dashboard_timezone_mismatch"
     assert transport.updates == []
-    assert "Dashboard" not in transport.tabs
+    assert layout.METRICS_TAB not in transport.tabs
 
 
 def test_the_time_zone_refusal_never_mentions_the_spreadsheet_id() -> None:
@@ -486,7 +553,7 @@ def test_initialization_is_one_batch_with_the_sentinel_last() -> None:
     assert sentinel_body["start"]["rowIndex"] == layout.parse_address(layout.SENTINEL_CELL)[0]
     assert sentinel_body["start"]["columnIndex"] == layout.parse_address(layout.SENTINEL_CELL)[1]
     assert sentinel_body["rows"][0]["values"][0]["userEnteredValue"] == {
-        "stringValue": layout.DASHBOARD_SENTINEL
+        "stringValue": layout.METRICS_SENTINEL
     }
 
     earlier_kinds = {next(iter(request)) for request in batch[:-1]}
@@ -519,7 +586,7 @@ def test_a_successful_sentinel_implies_the_whole_layout_was_applied() -> None:
 
     _service(transport).initialize()
 
-    assert _cell(transport, "M1") == layout.DASHBOARD_SENTINEL
+    assert _cell(transport, "M1") == layout.METRICS_SENTINEL
     for cell in layout.all_cells():
         assert _cell(transport, cell.address) == cell.content, cell.address
 
@@ -565,8 +632,8 @@ def test_a_retry_after_a_failed_batch_initializes_successfully() -> None:
 
     result = _service(transport).initialize()
 
-    assert result.state is DashboardInitState.INITIALIZED
-    assert _cell(transport, "M1") == layout.DASHBOARD_SENTINEL
+    assert result.state is MetricsInitState.INITIALIZED
+    assert _cell(transport, "M1") == layout.METRICS_SENTINEL
     assert _cell(transport, "B6").startswith("=IF(SUMPRODUCT(")
 
 
@@ -585,12 +652,12 @@ def test_a_lost_response_after_submission_is_resolved_by_the_next_inspection() -
         _service(transport).initialize()
 
     assert transport.applied_batches == 1
-    assert _cell(transport, "M1") == layout.DASHBOARD_SENTINEL
+    assert _cell(transport, "M1") == layout.METRICS_SENTINEL
 
     batches_before = len(transport.updates)
     result = _service(transport).initialize()
 
-    assert result.state is DashboardInitState.ALREADY_INITIALIZED
+    assert result.state is MetricsInitState.ALREADY_INITIALIZED
     assert len(transport.updates) == batches_before
     assert _cell(transport, "B6").startswith("=IF(SUMPRODUCT(")
 
@@ -604,7 +671,7 @@ def test_preflight_is_ready_without_a_dashboard_tab() -> None:
     result = SpreadsheetPreflightService(transport).check(SPREADSHEET_ID)
 
     assert result.is_ready is True
-    assert "Dashboard" not in result.tabs
+    assert layout.METRICS_TAB not in result.tabs
 
 
 def test_preflight_is_ready_with_a_foreign_dashboard_tab() -> None:
@@ -613,7 +680,7 @@ def test_preflight_is_ready_with_a_foreign_dashboard_tab() -> None:
     result = SpreadsheetPreflightService(transport).check(SPREADSHEET_ID)
 
     assert result.is_ready is True
-    assert "Dashboard" not in result.tabs
+    assert layout.METRICS_TAB not in result.tabs
 
 
 # ------------------------------------------------------- sync stays canonical
@@ -641,8 +708,8 @@ def test_the_foundation_exposes_dashboard_initialization(tmp_path) -> None:
 
     result = foundation.initialize_dashboard()
 
-    assert result.state is DashboardInitState.CREATED
-    assert _cell(transport, "M1") == layout.DASHBOARD_SENTINEL
+    assert result.state is MetricsInitState.CREATED
+    assert _cell(transport, "M1") == layout.METRICS_SENTINEL
 
 
 # ------------------------------------------------- whole-tab inspection
@@ -716,20 +783,20 @@ def test_a_truly_empty_existing_tab_is_initialized() -> None:
 
     result = _service(transport).initialize()
 
-    assert result.state is DashboardInitState.INITIALIZED
-    assert _cell(transport, "M1") == layout.DASHBOARD_SENTINEL
+    assert result.state is MetricsInitState.INITIALIZED
+    assert _cell(transport, "M1") == layout.METRICS_SENTINEL
 
 
 def test_a_refused_foreign_tab_is_left_completely_unchanged() -> None:
     grid = _grid_with("A1001", "kept")
     grid[0][0] = "header"
     transport = _spreadsheet(dashboard=[list(row) for row in grid])
-    before = [list(row) for row in transport.tabs["Dashboard"]]
+    before = [list(row) for row in transport.tabs[layout.METRICS_TAB]]
 
     with pytest.raises(GoogleSheetsError):
         _service(transport).initialize()
 
-    assert transport.tabs["Dashboard"] == before
+    assert transport.tabs[layout.METRICS_TAB] == before
     assert transport.applied_batches == 0
 
 
@@ -798,7 +865,7 @@ def test_an_unsupported_locale_is_refused_before_any_write() -> None:
 
     assert captured.value.code == "dashboard_locale_unsupported"
     assert transport.updates == []
-    assert "Dashboard" not in transport.tabs
+    assert layout.METRICS_TAB not in transport.tabs
 
 
 def test_a_missing_locale_is_refused_before_any_write() -> None:
@@ -820,7 +887,7 @@ def test_a_missing_locale_does_not_block_an_already_initialized_tab() -> None:
 
     result = _service(transport).initialize()
 
-    assert result.state is DashboardInitState.ALREADY_INITIALIZED
+    assert result.state is MetricsInitState.ALREADY_INITIALIZED
     assert transport.updates == []
 
 
@@ -840,7 +907,7 @@ def test_a_spreadsheet_reporting_in_id_initializes_with_indonesian_formulas() ->
 
     result = _service(transport).initialize()
 
-    assert result.state is DashboardInitState.CREATED
+    assert result.state is MetricsInitState.CREATED
     assert _cell(transport, "B2") == (
         '=TEXT(YEAR(TODAY());"0000")&"-"&TEXT(MONTH(TODAY());"00")&"-"&TEXT(DAY(TODAY());"00")'
     )
@@ -859,3 +926,40 @@ def test_in_id_and_id_id_write_identical_batches() -> None:
     _service(id_transport).initialize()
 
     assert in_transport.updates == id_transport.updates
+
+
+# ------------------------------------------------------------ legacy migration
+
+
+def test_a_legacy_metric_board_is_renamed_to_metrics() -> None:
+    """The old Dashboard board is moved, never deleted."""
+
+    row = [""] * 12
+    row.append(layout.METRICS_SENTINEL)
+    transport = _spreadsheet(legacy_dashboard=[row])
+
+    result = _service(transport).initialize()
+
+    assert result.state is MetricsInitState.ALREADY_INITIALIZED
+    assert layout.METRICS_TAB in transport.tabs
+    assert "Dashboard" not in transport.tabs
+    assert transport.tabs[layout.METRICS_TAB][0][12] == layout.METRICS_SENTINEL
+    rename_requests = [
+        request
+        for batch in transport.updates
+        for request in batch
+        if "updateSheetProperties" in request
+    ]
+    assert rename_requests
+    assert rename_requests[0]["updateSheetProperties"]["properties"]["title"] == layout.METRICS_TAB
+
+
+def test_a_foreign_dashboard_is_not_renamed() -> None:
+    transport = _spreadsheet(legacy_dashboard=[["my own notes"]])
+
+    result = _service(transport).initialize()
+
+    assert result.state is MetricsInitState.CREATED
+    assert "Dashboard" in transport.tabs
+    assert transport.tabs["Dashboard"] == [["my own notes"]]
+    assert layout.METRICS_TAB in transport.tabs

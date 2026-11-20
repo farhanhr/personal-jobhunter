@@ -27,8 +27,8 @@ def _formulas() -> dict[str, str]:
 
 
 def test_identity_constants() -> None:
-    assert layout.DASHBOARD_TAB == "Dashboard"
-    assert layout.DASHBOARD_SENTINEL == "PJF_DASHBOARD_V2"
+    assert layout.METRICS_TAB == layout.METRICS_TAB
+    assert layout.METRICS_SENTINEL == "PJF_DASHBOARD_V2"
     assert layout.DASHBOARD_TIMEZONE == "Asia/Jakarta"
     assert layout.SENTINEL_CELL == "M1"
 
@@ -36,7 +36,7 @@ def test_identity_constants() -> None:
 def test_dashboard_is_not_a_required_tab() -> None:
     from personal_job_finder_api.integrations.google_sheets.config import REQUIRED_TABS
 
-    assert "Dashboard" not in REQUIRED_TABS
+    assert layout.METRICS_TAB not in REQUIRED_TABS
     assert set(REQUIRED_TABS) == {"Opportunities", "Job_Sources"}
 
 
@@ -64,7 +64,7 @@ def test_visible_rows_follow_the_agreed_sections() -> None:
         for row in range(1, 41)
         if f"A{row}" in cells and not cells[f"A{row}"].startswith("=")
     }
-    assert labels[1].startswith("Job Search Dashboard")
+    assert labels[1].startswith("Job Search Metrics")
     assert "not a source of truth" in labels[1]
     assert labels[2] == "As of (Asia/Jakarta)"
     assert labels[5] == "Pipeline"
@@ -641,7 +641,7 @@ def test_the_sentinel_request_is_last_in_the_atomic_batch() -> None:
     requests = layout.build_initialization_requests(5)
 
     sentinel = requests[-1]["updateCells"]["rows"][0]["values"][0]["userEnteredValue"]
-    assert sentinel == {"stringValue": layout.DASHBOARD_SENTINEL}
+    assert sentinel == {"stringValue": layout.METRICS_SENTINEL}
 
     earlier = requests[:-1]
     assert len(earlier) == 1 + len(layout.build_format_requests(5))

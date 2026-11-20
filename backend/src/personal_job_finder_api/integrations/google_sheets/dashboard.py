@@ -1,6 +1,6 @@
-"""Optional, formula-only ``Dashboard`` tab initialization.
+"""Optional, formula-only ``Metrics`` tab initialization.
 
-The Dashboard is a companion view. It is never a canonical record, never part of
+The Metrics board is a companion view. It is never a canonical record, never part of
 :data:`personal_job_finder_api.integrations.google_sheets.config.REQUIRED_TABS`,
 and never read by preflight, refresh, or the sync dispatcher.
 
@@ -27,12 +27,13 @@ from personal_job_finder_api.integrations.google_sheets import dashboard_layout 
 from personal_job_finder_api.integrations.google_sheets.client import (
     FORMULA_RENDER_OPTION,
     GoogleSheetsClient,
+    SpreadsheetMetadata,
 )
 from personal_job_finder_api.integrations.google_sheets.errors import GoogleSheetsError
 
 
-class DashboardInitState(StrEnum):
-    """How the last initialization call left the Dashboard tab."""
+class MetricsInitState(StrEnum):
+    """How the last initialization call left the Metrics tab."""
 
     CREATED = "created"
     INITIALIZED = "initialized"
@@ -40,54 +41,55 @@ class DashboardInitState(StrEnum):
 
 
 @dataclass(frozen=True, slots=True)
-class DashboardInitResult:
+class MetricsInitResult:
     """A sanitized outcome that never carries the spreadsheet id."""
 
-    state: DashboardInitState
+    state: MetricsInitState
     message: str
 
 
 _MESSAGES = {
-    DashboardInitState.CREATED: "Dashboard tab created and initialized.",
-    DashboardInitState.INITIALIZED: "Dashboard tab initialized.",
-    DashboardInitState.ALREADY_INITIALIZED: (
-        "Dashboard tab is already initialized; nothing was changed."
+    MetricsInitState.CREATED: "Metrics tab created and initialized.",
+    MetricsInitState.INITIALIZED: "Metrics tab initialized.",
+    MetricsInitState.ALREADY_INITIALIZED: (
+        "Metrics tab is already initialized; nothing was changed."
     ),
 }
 
 
-class DashboardInitService:
-    """Create and initialize the optional Dashboard tab exactly once."""
+class MetricsInitService:
+    """Create and initialize the optional Metrics board exactly once."""
 
     def __init__(self, client: GoogleSheetsClient, spreadsheet_id: str) -> None:
         self._client = client
         self._spreadsheet_id = spreadsheet_id
 
-    def initialize(self) -> DashboardInitResult:
+    def initialize(self) -> MetricsInitResult:
         metadata = self._client.get_metadata(self._spreadsheet_id)
         _require_jakarta_timezone(metadata.time_zone)
+        metadata = self._adopt_legacy_tab(metadata)
 
-        sheet_id = metadata.sheet_id_for(layout.DASHBOARD_TAB)
+        sheet_id = metadata.sheet_id_for(layout.METRICS_TAB)
         created = False
 
         if sheet_id is None:
-            if layout.DASHBOARD_TAB in metadata.titles:
+            if layout.METRICS_TAB in metadata.titles:
                 raise GoogleSheetsError(
                     "dashboard_metadata_incomplete",
-                    "The Dashboard tab exists but its sheet id is unavailable, so "
+                    "The Metrics tab exists but its sheet id is unavailable, so "
                     "formatting cannot be applied safely. Nothing was changed.",
                 )
             # Resolve the formula dialect before creating the tab, so an
-            # unsupported locale never leaves a half-initialized Dashboard.
+            # unsupported locale never leaves a half-initialized Metrics board.
             dialect = _formula_dialect(metadata.locale)
-            self._client.add_tabs(self._spreadsheet_id, [layout.DASHBOARD_TAB])
+            self._client.add_tabs(self._spreadsheet_id, [layout.METRICS_TAB])
             created = True
             metadata = self._client.get_metadata(self._spreadsheet_id)
-            sheet_id = metadata.sheet_id_for(layout.DASHBOARD_TAB)
+            sheet_id = metadata.sheet_id_for(layout.METRICS_TAB)
             if sheet_id is None:
                 raise GoogleSheetsError(
                     "dashboard_metadata_incomplete",
-                    "The Dashboard tab was created but its sheet id is unavailable. "
+                    "The Metrics tab was created but its sheet id is unavailable. "
                     "Run the command again to finish initialization.",
                 )
         else:
@@ -101,10 +103,53 @@ class DashboardInitService:
             layout.build_initialization_requests(sheet_id, dialect),
         )
 
-        state = DashboardInitState.CREATED if created else DashboardInitState.INITIALIZED
-        return DashboardInitResult(state=state, message=_MESSAGES[state])
+        state = MetricsInitState.CREATED if created else MetricsInitState.INITIALIZED
+        return MetricsInitResult(state=state, message=_MESSAGES[state])
 
-    def _inspect_existing_tab(self) -> DashboardInitResult | None:
+    def _adopt_legacy_tab(self, metadata: SpreadsheetMetadata) -> SpreadsheetMetadata:
+        """Rename the old ``Dashboard`` metric board to ``Metrics``.
+
+        Before the workspace split, the metric board lived on ``Dashboard``. The
+        name now belongs to the summary-cards tab, so an existing board is moved
+        rather than deleted: renaming carries every formula and the sentinel with
+        it. A ``Dashboard`` tab we do not own is left alone for the cards service
+        to classify.
+        """
+
+        if layout.METRICS_TAB in metadata.titles or "Dashboard" not in metadata.titles:
+            return metadata
+
+        sheet_id = metadata.sheet_id_for("Dashboard")
+        if sheet_id is None:
+            return metadata
+
+        sentinel_rows = self._client.get_values(
+            self._spreadsheet_id,
+            [f"Dashboard!{layout.SENTINEL_CELL}"],
+            value_render_option=FORMULA_RENDER_OPTION,
+        )
+        rows = sentinel_rows.get(f"Dashboard!{layout.SENTINEL_CELL}") or []
+        sentinel = rows[0][0] if rows and rows[0] else ""
+        if not sentinel.startswith(layout.METRICS_SENTINEL_PREFIX):
+            return metadata
+
+        self._client.batch_update(
+            self._spreadsheet_id,
+            [
+                {
+                    "updateSheetProperties": {
+                        "properties": {
+                            "sheetId": sheet_id,
+                            "title": layout.METRICS_TAB,
+                        },
+                        "fields": "title",
+                    }
+                }
+            ],
+        )
+        return self._client.get_metadata(self._spreadsheet_id)
+
+    def _inspect_existing_tab(self) -> MetricsInitResult | None:
         """Classify an existing tab by reading its entire content.
 
         The read uses the ``FORMULA`` render over the whole tab, so a formula
@@ -124,30 +169,30 @@ class DashboardInitService:
         except GoogleSheetsError as exc:
             raise GoogleSheetsError(
                 "dashboard_inspection_failed",
-                "The existing Dashboard tab could not be inspected, so it was not "
+                "The existing Metrics tab could not be inspected, so it was not "
                 "treated as empty. Nothing was changed; check the Google Sheets "
                 "connection and retry.",
             ) from exc
 
         sentinel = _cell_text(grid, layout.parse_address(layout.SENTINEL_CELL))
 
-        if sentinel == layout.DASHBOARD_SENTINEL:
-            return DashboardInitResult(
-                state=DashboardInitState.ALREADY_INITIALIZED,
-                message=_MESSAGES[DashboardInitState.ALREADY_INITIALIZED],
+        if sentinel == layout.METRICS_SENTINEL:
+            return MetricsInitResult(
+                state=MetricsInitState.ALREADY_INITIALIZED,
+                message=_MESSAGES[MetricsInitState.ALREADY_INITIALIZED],
             )
-        if sentinel.startswith(layout.DASHBOARD_SENTINEL_PREFIX):
+        if sentinel.startswith(layout.METRICS_SENTINEL_PREFIX):
             raise GoogleSheetsError(
                 "dashboard_unsupported_version",
-                "The Dashboard tab was written by an unsupported version of this "
+                "The Metrics tab was written by an unsupported version of this "
                 "application. Nothing was changed; inspect the tab before retrying.",
             )
         if any(str(cell).strip() for row in grid for cell in row):
             raise GoogleSheetsError(
                 "dashboard_tab_not_owned",
-                "The Dashboard tab already contains data that this application did "
+                "The Metrics tab already contains data that this application did "
                 "not write. Nothing was changed; rename or clear that tab manually "
-                "if you want an initialized Dashboard.",
+                "if you want an initialized Metrics board.",
             )
         return None
 
@@ -163,7 +208,7 @@ def _formula_dialect(locale: str | None) -> layout.FormulaDialect:
     if locale is None:
         raise GoogleSheetsError(
             "dashboard_locale_missing",
-            "The spreadsheet locale is unknown, so Dashboard formulas cannot be "
+            "The spreadsheet locale is unknown, so Metrics formulas cannot be "
             "generated safely. Nothing was changed.",
         )
     dialect = layout.resolve_formula_dialect(locale)
@@ -171,7 +216,7 @@ def _formula_dialect(locale: str | None) -> layout.FormulaDialect:
         supported = ", ".join(sorted(layout.FORMULA_DIALECTS))
         raise GoogleSheetsError(
             "dashboard_locale_unsupported",
-            f"The spreadsheet locale {locale} is not supported for Dashboard "
+            f"The spreadsheet locale {locale} is not supported for Metrics "
             f"formulas (supported: {supported}). Nothing was changed.",
         )
     return dialect
@@ -182,12 +227,12 @@ def _require_jakarta_timezone(time_zone: str | None) -> None:
         raise GoogleSheetsError(
             "dashboard_timezone_missing",
             f"The spreadsheet time zone is unknown. Set it to {layout.DASHBOARD_TIMEZONE} "
-            "in Google Sheets before initializing the Dashboard. Nothing was changed.",
+            "in Google Sheets before initializing the Metrics board. Nothing was changed.",
         )
     if time_zone != layout.DASHBOARD_TIMEZONE:
         raise GoogleSheetsError(
             "dashboard_timezone_mismatch",
-            f"The spreadsheet time zone is {time_zone}, but the Dashboard requires "
+            f"The spreadsheet time zone is {time_zone}, but the Metrics board requires "
             f"{layout.DASHBOARD_TIMEZONE}. Set it manually in Google Sheets "
             "(File > Settings > Time zone) and run the command again. "
             "Nothing was changed.",

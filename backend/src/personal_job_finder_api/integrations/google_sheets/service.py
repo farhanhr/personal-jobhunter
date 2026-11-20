@@ -22,8 +22,8 @@ from personal_job_finder_api.integrations.google_sheets.credentials import (
     build_credential_store,
 )
 from personal_job_finder_api.integrations.google_sheets.dashboard import (
-    DashboardInitResult,
-    DashboardInitService,
+    MetricsInitResult,
+    MetricsInitService,
 )
 from personal_job_finder_api.integrations.google_sheets.oauth import (
     GoogleSheetsCredentialsProvider,
@@ -32,6 +32,14 @@ from personal_job_finder_api.integrations.google_sheets.oauth import (
 from personal_job_finder_api.integrations.google_sheets.preflight import (
     PreflightResult,
     SpreadsheetPreflightService,
+)
+from personal_job_finder_api.integrations.google_sheets.workspace import (
+    DashboardInitResult,
+    WorkspaceDashboardService,
+)
+from personal_job_finder_api.integrations.google_sheets.workspace_repair import (
+    RepairOutcome,
+    WorkspaceRepairService,
 )
 
 
@@ -50,10 +58,20 @@ class GoogleSheetsFoundation:
     def initialize(self) -> PreflightResult:
         return self.preflight.initialize(self.config.spreadsheet_id)
 
-    def initialize_dashboard(self) -> DashboardInitResult:
-        """Create and initialize the optional Dashboard tab."""
+    def initialize_dashboard(self) -> MetricsInitResult:
+        """Create and initialize the optional metric board (``Metrics``)."""
 
-        return DashboardInitService(self.client, self.config.spreadsheet_id).initialize()
+        return MetricsInitService(self.client, self.config.spreadsheet_id).initialize()
+
+    def initialize_workspace(self) -> DashboardInitResult:
+        """Create and initialize the optional summary cards (``Dashboard``)."""
+
+        return WorkspaceDashboardService(self.client, self.config.spreadsheet_id).initialize()
+
+    def repair_workspace(self, *, force: bool = False) -> RepairOutcome:
+        """Repair workbook structure without touching user data."""
+
+        return WorkspaceRepairService(self.client, self.config.spreadsheet_id).repair(force=force)
 
 
 def build_google_sheets_transport(settings: Settings) -> SheetsTransport:

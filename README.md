@@ -135,29 +135,45 @@ browser, and the resulting token is kept in your operating system's credential s
    `init` refuses to overwrite a non-empty header row that does not match the expected
    schema. Fix that case by hand; nothing is rewritten for you.
 
-8. Optionally add the formula-only `Dashboard` tab:
+8. Optionally build the workspace: summary cards plus an editable table.
 
    ```bash
    uv run python -m personal_job_finder_api.integrations.google_sheets.cli dashboard-init
+   uv run python -m personal_job_finder_api.integrations.google_sheets.cli sync
    ```
 
-   This tab is a companion summary, never a source of truth, and it is not required.
-   It refuses to run unless the spreadsheet time zone is `Asia/Jakarta` and the locale is
-   one it can write formulas for (`en_US`, `id_ID`, or its alias `in_ID`), and it refuses
-   to overwrite a `Dashboard` tab it did not create. Running it again after a successful
-   setup changes nothing. With only header rows, every opportunity, status, and source
-   metric shows `0`.
+   `dashboard-init` creates the `Dashboard` tab: six read-only cards (need to apply,
+   applied in the last 7 days, interviews in the next 7 days, offers, active, archived).
+   `sync` then runs the repair pass, which turns `Opportunities` into a native Sheets
+   table: banded rows, a frozen header, and a dropdown on `user_status` and
+   `application_status`. The dropdowns are suggestions, not constraints — `Ghosted` or
+   any other text you type stays exactly as typed.
 
-   To check the tab without changing anything:
+   You work directly in the `Opportunities` table. Add a row by hand with a company and a
+   job title and no `opportunity_id`; the next `sync` gives it a stable identity and keeps
+   your values. Set `user_status` to `ignored` to archive a row: it leaves the active
+   count and the cards stop counting it, but nothing is deleted.
+
+   The older 25-metric board is still available as the `Metrics` tab:
+
+   ```bash
+   uv run python -m personal_job_finder_api.integrations.google_sheets.cli metrics-init
+   ```
+
+   An existing `Dashboard` board from an earlier version is renamed to `Metrics`, never
+   deleted. Every tab here is a companion view, never a source of truth, and none is
+   required.
+
+   To check both tabs without changing anything:
 
    ```bash
    uv run python -m personal_job_finder_api.integrations.google_sheets.cli dashboard-verify
    ```
 
-   This reads the tab and both canonical tabs, recomputes every metric independently, and
+   This reads both tabs and both canonical tabs, recomputes every number independently, and
    reports any cell that shows an error, a constant instead of a formula, or a number that
-   disagrees. It exits non-zero on a mismatch. A `Dashboard` written by an older version of
-   this app is reported as unsupported: delete that tab and run `dashboard-init` again.
+   disagrees. It exits non-zero on a mismatch. A tab written by an older version of this
+   app is reported as unsupported: delete that tab and re-run its `-init` command.
 
 9. Copy new results into your sheet whenever you want:
 
@@ -210,7 +226,8 @@ are queued for your sheet and the dashboard shows what was found.
   is not supported.
 - **Tracker dates are plain text.** Write `YYYY-MM-DD` or `DD/MM/YYYY` with the day
   first; a trailing note such as `(pagi)` is ignored when dates are counted. The app
-  never rewrites what you typed.
+  never rewrites what you typed, and those columns are deliberately not formatted as
+  dates: a date format would turn `2026-11-18` into a number the tracker cannot read.
 - **The spreadsheet time zone must be `Asia/Jakarta`** for the optional spreadsheet
   `Dashboard` date windows. The app never changes it for you.
 - **The spreadsheet locale must be `en_US`, `id_ID`, or `in_ID`** for the optional
@@ -223,7 +240,7 @@ are queued for your sheet and the dashboard shows what was found.
 The app is usable today: target roles, company sources, manual searches with the daily
 limit and cooldown, an in-app dashboard, an opportunities feed with a detail view, an
 application tracker, Google Sheets sign-in and synchronization, and an optional
-formula-only `Dashboard` tab in your spreadsheet.
+workspace `Dashboard` cards and an editable `Opportunities` table in your spreadsheet.
 
 Google Sheets support is implemented and covered by mocked tests, plus an opt-in live
 suite that runs a real round-trip against a disposable scratch spreadsheet. The default

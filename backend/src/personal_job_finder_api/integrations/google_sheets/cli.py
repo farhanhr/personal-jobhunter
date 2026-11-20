@@ -180,6 +180,7 @@ def _build_parser() -> argparse.ArgumentParser:
             "init",
             "dashboard-init",
             "dashboard-verify",
+            "metrics-init",
             "disconnect",
             "sync",
             "recover",
@@ -188,9 +189,10 @@ def _build_parser() -> argparse.ArgumentParser:
         help=(
             "auth: connect a Google account; check: read-only preflight; "
             "init: create missing canonical tabs and empty headers; "
-            "dashboard-init: create the optional formula-only Dashboard tab; "
-            "dashboard-verify: read-only check that every Dashboard metric agrees "
-            "with the canonical rows; "
+            "dashboard-init: create the optional summary-cards Dashboard tab; "
+            "metrics-init: create the optional formula-only Metrics board; "
+            "dashboard-verify: read-only check that every summary card and metric "
+            "agrees with the canonical rows; "
             "disconnect: remove the stored Google credential; sync: dispatch due "
             "outbox work; recover: return abandoned in-progress work to the retry "
             "queue; requeue: re-enable one blocked projection after fixing its cause"
@@ -234,6 +236,11 @@ def main(argv: Sequence[str] | None = None) -> int:
             return 0 if result.is_ready else 1
 
         if arguments.command == "dashboard-init":
+            outcome = foundation.initialize_workspace()
+            print(outcome.message)
+            return 0
+
+        if arguments.command == "metrics-init":
             outcome = foundation.initialize_dashboard()
             print(outcome.message)
             return 0

@@ -287,11 +287,18 @@ class StubDashboardFoundation:
     def initialize(self) -> PreflightResult:
         raise AssertionError("dashboard-init must not run canonical init")
 
-    def initialize_dashboard(self) -> Any:
+    def initialize_workspace(self) -> Any:
+        """The cards tab is what ``dashboard-init`` initializes."""
+
         self.dashboard_calls += 1
         if self._error is not None:
             raise self._error
         return self._result
+
+    def initialize_dashboard(self) -> Any:
+        """The metric board is ``metrics-init``."""
+
+        raise AssertionError("dashboard-init must not initialize the metric board")
 
 
 def test_dashboard_init_is_an_explicit_command() -> None:
@@ -307,14 +314,14 @@ def test_dashboard_init_prints_the_success_message(
     capsys: pytest.CaptureFixture[str],
 ) -> None:
     from personal_job_finder_api.integrations.google_sheets.dashboard import (
-        DashboardInitResult,
-        DashboardInitState,
+        MetricsInitResult,
+        MetricsInitState,
     )
 
     foundation = StubDashboardFoundation(
-        result=DashboardInitResult(
-            state=DashboardInitState.CREATED,
-            message="Dashboard tab created and initialized.",
+        result=MetricsInitResult(
+            state=MetricsInitState.CREATED,
+            message="Dashboard cards tab created and initialized.",
         )
     )
     monkeypatch.setattr(
@@ -327,7 +334,7 @@ def test_dashboard_init_prints_the_success_message(
 
     output = capsys.readouterr()
     assert exit_code == 0
-    assert "Dashboard tab created and initialized." in output.out
+    assert "Dashboard cards tab created and initialized." in output.out
     assert foundation.dashboard_calls == 1
     assert SPREADSHEET_ID not in output.out
     assert SPREADSHEET_ID not in output.err
@@ -456,3 +463,52 @@ def test_a_database_failure_is_reported_with_a_stable_code(
     assert "database_unavailable" in output.err
     assert "Traceback" not in output.err
     assert "sync_outbox" not in output.err
+
+
+def test_the_real_foundation_exposes_both_initializers() -> None:
+    """Regression: the CLI called a method the foundation did not have.
+
+    The stubbed CLI tests could not catch it, because they replace the foundation
+    entirely. This pins the real interface the CLI depends on.
+    """
+
+    from personal_job_finder_api.integrations.google_sheets.service import (
+        GoogleSheetsFoundation,
+    )
+
+    assert hasattr(GoogleSheetsFoundation, "initialize_workspace")
+    assert hasattr(GoogleSheetsFoundation, "initialize_dashboard")
+    assert hasattr(GoogleSheetsFoundation, "repair_workspace")
+
+
+def test_dashboard_init_and_metrics_init_target_different_services(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """One command per tab, so neither can silently initialize the other."""
+
+    calls: list[str] = []
+
+    class RecordingFoundation:
+        def initialize_workspace(self):
+            calls.append("workspace")
+
+            class Result:
+                message = "workspace"
+
+            return Result()
+
+        def initialize_dashboard(self):
+            calls.append("metrics")
+
+            class Result:
+                message = "metrics"
+
+            return Result()
+
+    monkeypatch.setattr(
+        cli_module, "build_google_sheets_foundation", lambda settings: RecordingFoundation()
+    )
+
+    assert cli_module.main(["dashboard-init"]) == 0
+    assert cli_module.main(["metrics-init"]) == 0
+    assert calls == ["workspace", "metrics"]

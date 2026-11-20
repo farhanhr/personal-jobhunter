@@ -12,12 +12,13 @@ the supervised live test, which snapshots and restores its own data.
 
 from __future__ import annotations
 
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
 from datetime import date
 
 from personal_job_finder_api.integrations.google_sheets import dashboard_layout as layout
 from personal_job_finder_api.integrations.google_sheets import dashboard_oracle as oracle
+from personal_job_finder_api.integrations.google_sheets import workspace_layout as workspace
 from personal_job_finder_api.integrations.google_sheets.client import (
     UNFORMATTED_RENDER_OPTION,
     GoogleSheetsClient,
@@ -28,6 +29,8 @@ from personal_job_finder_api.integrations.google_sheets.config import (
     JOB_SOURCE_HEADERS,
     OPPORTUNITY_HEADERS,
 )
+
+CARD_CELLS: tuple[str, ...] = workspace.CARD_CELLS
 
 #: Cells whose value is a metric. Everything else in the tab is a label or a note.
 METRIC_CELLS: tuple[str, ...] = tuple(
@@ -59,6 +62,13 @@ class MetricCheck:
     error: str | None
     status: str
     formula: str | None = None
+    #: The tab the cell lives on. Two tabs share cell addresses (``B6`` is both a
+    #: summary card and a metric), so a bare address is ambiguous in a report.
+    tab: str = ""
+
+    @property
+    def label(self) -> str:
+        return f"{self.tab}!{self.address}" if self.tab else self.address
 
     @property
     def ok(self) -> bool:
@@ -135,34 +145,68 @@ def read_canonical_rows(
     return opportunities, sources
 
 
-def read_metric_cells(
+def read_cells(
     client: GoogleSheetsClient,
     spreadsheet_id: str,
+    *,
+    tab: str,
+    addresses: Sequence[str],
+    sentinel_address: str,
 ) -> dict[str, GridCell]:
-    """Read every metric cell with its formula, effective value, and error.
+    """Read cells with their formula, effective value, and error.
 
-    One bounding rectangle is requested instead of 25 single-cell ranges. The
+    One bounding rectangle is requested instead of one range per cell. The
     provider groups grid data by sheet and does not preserve request order across
     sheets, so the smallest request that yields unambiguous addresses is the
     safest one.
     """
 
-    rows = [int(address[1:]) for address in METRIC_CELLS]
-    columns = sorted({address[0] for address in METRIC_CELLS})
+    rows = [int(address[1:]) for address in addresses]
+    columns = sorted({address[0] for address in addresses})
     last_row = max(rows)
     # The sentinel lives to the right of the visible columns. Extending the
     # bounding rectangle by one column keeps it in the same request, which saves
     # one read per verification and keeps a polling loop inside the API quota.
-    last_column = max(columns[-1], layout.SENTINEL_CELL[0])
-    range_name = f"{layout.DASHBOARD_TAB}!A1:{last_column}{last_row}"
+    last_column = max(columns[-1], sentinel_address[0])
+    range_name = f"{tab}!A1:{last_column}{last_row}"
     grid = client.get_grid(spreadsheet_id, [range_name])
-    wanted = set(METRIC_CELLS) | {layout.SENTINEL_CELL}
+    wanted = set(addresses) | {sentinel_address}
     cells: dict[str, GridCell] = {}
     for row in grid.get(range_name) or []:
         for cell in row:
             if cell.address in wanted:
                 cells[cell.address] = cell
     return cells
+
+
+def read_metric_cells(
+    client: GoogleSheetsClient,
+    spreadsheet_id: str,
+) -> dict[str, GridCell]:
+    """Read every metric-board cell."""
+
+    return read_cells(
+        client,
+        spreadsheet_id,
+        tab=layout.METRICS_TAB,
+        addresses=METRIC_CELLS,
+        sentinel_address=layout.SENTINEL_CELL,
+    )
+
+
+def read_card_cells(
+    client: GoogleSheetsClient,
+    spreadsheet_id: str,
+) -> dict[str, GridCell]:
+    """Read every summary-card cell."""
+
+    return read_cells(
+        client,
+        spreadsheet_id,
+        tab=workspace.DASHBOARD_TAB,
+        addresses=CARD_CELLS,
+        sentinel_address=workspace.SENTINEL_CELL,
+    )
 
 
 def _normalize_actual(value: str | None) -> str:
@@ -185,15 +229,18 @@ def _normalize_actual(value: str | None) -> str:
 def compare(
     expected: oracle.ExpectedMetrics,
     cells: dict[str, GridCell],
+    addresses: Sequence[str] = METRIC_CELLS,
+    *,
+    tab: str = "",
 ) -> tuple[MetricCheck, ...]:
-    """Compare each metric cell against the oracle, cell by cell."""
+    """Compare each requested cell against the oracle, cell by cell."""
 
     checks: list[MetricCheck] = []
-    for address in METRIC_CELLS:
+    for address in addresses:
         cell = cells.get(address)
         want = expected.values.get(address)
         if cell is None:
-            checks.append(MetricCheck(address, want, None, None, STATUS_MISSING))
+            checks.append(MetricCheck(address, want, None, None, STATUS_MISSING, tab=tab))
             continue
         if cell.error is not None:
             checks.append(
@@ -204,6 +251,7 @@ def compare(
                     cell.error,
                     STATUS_ERROR,
                     formula=cell.formula,
+                    tab=tab,
                 )
             )
             continue
@@ -216,6 +264,7 @@ def compare(
                     None,
                     STATUS_NOT_A_FORMULA,
                     formula=None,
+                    tab=tab,
                 )
             )
             continue
@@ -230,6 +279,7 @@ def compare(
                 None,
                 status,
                 formula=cell.formula,
+                tab=tab,
             )
         )
     return tuple(checks)
@@ -255,13 +305,16 @@ def verify_dashboard(
     problems: list[str] = []
     metadata = metadata or client.get_metadata(spreadsheet_id)
 
-    if layout.DASHBOARD_TAB not in metadata.titles:
+    wanted_tabs = [
+        tab for tab in (workspace.DASHBOARD_TAB, layout.METRICS_TAB) if tab in metadata.titles
+    ]
+    if not wanted_tabs:
         return VerifyReport(
             locale=metadata.locale,
             time_zone=metadata.time_zone,
             tabs=metadata.titles,
             checks=(),
-            problems=("The Dashboard tab does not exist.",),
+            problems=("Neither the Dashboard cards tab nor the Metrics board exists.",),
         )
 
     if metadata.time_zone != layout.DASHBOARD_TIMEZONE:
@@ -281,27 +334,46 @@ def verify_dashboard(
             problems=(*problems, str(exc)),
         )
 
-    expected = oracle.compute(
-        oracle.opportunity_rows(opportunities),
-        oracle.source_rows(sources),
-        as_of=as_of,
-    )
-    cells = read_metric_cells(client, spreadsheet_id)
+    projected = oracle.opportunity_rows(opportunities)
+    checks: list[MetricCheck] = []
 
-    # The tab must be owned by this version before its numbers mean anything.
-    # The sentinel is a literal, so it arrives in the same grid read.
-    sentinel_cell = cells.get(layout.SENTINEL_CELL)
-    sentinel = (sentinel_cell.literal or "") if sentinel_cell is not None else ""
-    if sentinel != layout.DASHBOARD_SENTINEL:
-        problems.append(
-            "The Dashboard sentinel is missing or different, so the tab is not "
-            "owned by this version. Delete the tab and run dashboard-init."
+    if workspace.DASHBOARD_TAB in metadata.titles:
+        cards_expected = oracle.compute_cards(projected, as_of=as_of)
+        cards = read_card_cells(client, spreadsheet_id)
+        sentinel = _literal(cards, workspace.SENTINEL_CELL)
+        if sentinel != workspace.DASHBOARD_SENTINEL:
+            problems.append(
+                "The Dashboard cards sentinel is missing or different, so the tab is "
+                "not owned by this version. Delete the tab and run dashboard-init."
+            )
+        checks.extend(compare(cards_expected, cards, CARD_CELLS, tab=workspace.DASHBOARD_TAB))
+
+    if layout.METRICS_TAB in metadata.titles:
+        metrics_expected = oracle.compute(
+            projected,
+            oracle.source_rows(sources),
+            as_of=as_of,
         )
+        metrics = read_metric_cells(client, spreadsheet_id)
+        sentinel = _literal(metrics, layout.SENTINEL_CELL)
+        if sentinel != layout.METRICS_SENTINEL:
+            problems.append(
+                "The Metrics sentinel is missing or different, so the tab is not "
+                "owned by this version. Delete the tab and run metrics-init."
+            )
+        checks.extend(compare(metrics_expected, metrics, METRIC_CELLS, tab=layout.METRICS_TAB))
 
     return VerifyReport(
         locale=metadata.locale,
         time_zone=metadata.time_zone,
         tabs=metadata.titles,
-        checks=compare(expected, cells),
+        checks=tuple(checks),
         problems=tuple(problems),
     )
+
+
+def _literal(cells: Mapping[str, GridCell], address: str) -> str:
+    """Return a literal cell value, or an empty string when absent."""
+
+    cell = cells.get(address)
+    return (cell.literal or "") if cell is not None else ""
