@@ -1,22 +1,31 @@
 """Local command-line setup for the Google Sheets foundation.
 
 Commands never print credentials, OAuth response bodies, or spreadsheet IDs.
-The ``init`` command is the only path that writes to the spreadsheet, and it
-only runs after an explicitly typed command.
+Only the explicitly typed ``init``, ``dashboard-init``, and ``sync`` commands
+write to the spreadsheet; ``check`` stays read-only.
 """
 
 from __future__ import annotations
 
 import argparse
+import logging
 import sys
 from collections.abc import Sequence
+from zoneinfo import ZoneInfo
+
+from sqlalchemy.exc import SQLAlchemyError
 
 from personal_job_finder_api.core.config import Settings
 from personal_job_finder_api.core.time import utc_now
 from personal_job_finder_api.db.engine import create_database_engine
+from personal_job_finder_api.db.migrate import run_migrations
+from personal_job_finder_api.domain.search_policy import JAKARTA_TIMEZONE
 from personal_job_finder_api.integrations.google_sheets.credentials import (
     CredentialStoreError,
     build_credential_store,
+)
+from personal_job_finder_api.integrations.google_sheets.dashboard_verify import (
+    verify_dashboard,
 )
 from personal_job_finder_api.integrations.google_sheets.errors import GoogleSheetsError
 from personal_job_finder_api.integrations.google_sheets.oauth import (
@@ -26,6 +35,7 @@ from personal_job_finder_api.integrations.google_sheets.preflight import (
     PreflightResult,
 )
 from personal_job_finder_api.integrations.google_sheets.service import (
+    GoogleSheetsFoundation,
     build_google_sheets_foundation,
 )
 from personal_job_finder_api.repositories.sync_outbox import (
@@ -53,11 +63,54 @@ def _print_preflight(result: PreflightResult) -> None:
     print("Spreadsheet is ready." if result.is_ready else "Spreadsheet is not ready.")
 
 
+def _run_dashboard_verify(settings: Settings, foundation: GoogleSheetsFoundation) -> int:
+    """Read-only comparison of every Dashboard metric with the canonical rows."""
+
+    as_of = utc_now().astimezone(ZoneInfo(JAKARTA_TIMEZONE)).date()
+    report = verify_dashboard(
+        foundation.client,
+        foundation.config.spreadsheet_id,
+        as_of=as_of,
+    )
+
+    print(f"Locale: {report.locale or 'unknown'} | Time zone: {report.time_zone or 'unset'}")
+    for check in report.checks:
+        if check.ok:
+            continue
+        detail = f"{check.address}: expected {check.expected!r}, actual {check.actual!r}"
+        if check.error is not None:
+            detail += f" (error {check.error})"
+        if check.status == "not_a_formula":
+            detail += " (cell is a constant, not a formula)"
+        if check.status == "missing":
+            detail += " (cell is missing)"
+        print(detail, file=sys.stderr)
+    for problem in report.problems:
+        print(problem, file=sys.stderr)
+    print(report.summary())
+    return 0 if report.ok else 1
+
+
 def _run_sync(settings: Settings, arguments: argparse.Namespace) -> int:
     """Run one manual dispatch. No scheduler, no background loop."""
 
     engine = create_database_engine(settings)
     try:
+        # The API server migrates on startup; the CLI must do the same, otherwise
+        # `sync` on a fresh data directory fails with "no such table" and the
+        # operator sees only a generic message.
+        try:
+            # Alembic logs every applied revision at INFO on stderr. A CLI whose
+            # real output is one summary line should not print migration chatter.
+            logging.getLogger("alembic").setLevel(logging.WARNING)
+            run_migrations(settings.database_url)
+        except SQLAlchemyError:
+            raise GoogleSheetsError(
+                "database_unavailable",
+                "The local operational database could not be prepared. Check that "
+                f"{settings.data_dir} is writable, then retry.",
+            ) from None
+
         if arguments.command == "recover":
             # Recovery only touches SQLite, so it must work even when the stored
             # Google credential is the reason work is stuck.
@@ -125,6 +178,8 @@ def _build_parser() -> argparse.ArgumentParser:
             "auth",
             "check",
             "init",
+            "dashboard-init",
+            "dashboard-verify",
             "disconnect",
             "sync",
             "recover",
@@ -132,10 +187,13 @@ def _build_parser() -> argparse.ArgumentParser:
         ),
         help=(
             "auth: connect a Google account; check: read-only preflight; "
-            "init: create missing tabs and empty headers; disconnect: remove the "
-            "stored Google credential; sync: dispatch due outbox work; recover: "
-            "return abandoned in-progress work to the retry queue; requeue: "
-            "re-enable one blocked projection after fixing its cause"
+            "init: create missing canonical tabs and empty headers; "
+            "dashboard-init: create the optional formula-only Dashboard tab; "
+            "dashboard-verify: read-only check that every Dashboard metric agrees "
+            "with the canonical rows; "
+            "disconnect: remove the stored Google credential; sync: dispatch due "
+            "outbox work; recover: return abandoned in-progress work to the retry "
+            "queue; requeue: re-enable one blocked projection after fixing its cause"
         ),
     )
     parser.add_argument(
@@ -174,6 +232,14 @@ def main(argv: Sequence[str] | None = None) -> int:
             result = foundation.check()
             _print_preflight(result)
             return 0 if result.is_ready else 1
+
+        if arguments.command == "dashboard-init":
+            outcome = foundation.initialize_dashboard()
+            print(outcome.message)
+            return 0
+
+        if arguments.command == "dashboard-verify":
+            return _run_dashboard_verify(settings, foundation)
 
         result = foundation.initialize()
         _print_preflight(result)

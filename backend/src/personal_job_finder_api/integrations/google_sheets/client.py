@@ -7,11 +7,13 @@ callers or logs. The transport is injectable so tests never open a socket.
 
 from __future__ import annotations
 
+import re
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from typing import Any, Protocol
 
 import httplib2
+from google_auth_httplib2 import AuthorizedHttp
 from googleapiclient.discovery import build
 from googleapiclient.errors import HttpError
 
@@ -26,6 +28,16 @@ from personal_job_finder_api.integrations.google_sheets.errors import (
 )
 
 RAW_INPUT_OPTION = "RAW"
+
+#: Render option that returns the formula text for a formula cell, so an
+#: empty-string result is still visible as user-entered content.
+FORMULA_RENDER_OPTION = "FORMULA"
+
+#: Read numbers and dates as the provider stores them, not as the locale would
+#: display them. A tracker date column must never be re-read through a locale
+#: format, because ``11/20/2026`` and ``20/11/2026`` are the same text to the API
+#: but different dates to a reader.
+UNFORMATTED_RENDER_OPTION = "UNFORMATTED_VALUE"
 
 
 def column_letter(index: int) -> str:
@@ -52,6 +64,14 @@ class SheetsTransport(Protocol):
         ranges: list[str],
     ) -> dict[str, Any]: ...
 
+    def batch_get_values_with_render(
+        self,
+        spreadsheet_id: str,
+        ranges: list[str],
+        *,
+        value_render_option: str,
+    ) -> dict[str, Any]: ...
+
     def batch_update_values(
         self,
         spreadsheet_id: str,
@@ -66,12 +86,66 @@ class SheetsTransport(Protocol):
         requests: list[dict[str, Any]],
     ) -> dict[str, Any]: ...
 
+    def get_spreadsheet_grid(
+        self,
+        spreadsheet_id: str,
+        ranges: list[str],
+    ) -> dict[str, Any]: ...
+
+
+@dataclass(frozen=True, slots=True)
+class SheetProperties:
+    """The parts of one sheet's properties this adapter exposes."""
+
+    title: str
+    sheet_id: int | None = None
+
 
 @dataclass(frozen=True, slots=True)
 class SpreadsheetMetadata:
-    """Tab titles exposed by the spreadsheet metadata endpoint."""
+    """Tab titles, spreadsheet properties, and per-tab sheet ids.
+
+    ``locale`` decides the formula argument separator used by the optional
+    Dashboard tab, and ``time_zone`` decides what ``TODAY()`` means. ``sheet_id``
+    and both properties are optional so a minimal provider response (or a test
+    fake) still satisfies read-only preflight. A caller that needs a sheet id
+    must handle ``None`` instead of guessing a number.
+    """
 
     titles: tuple[str, ...]
+    time_zone: str | None = None
+    locale: str | None = None
+    sheets: tuple[SheetProperties, ...] = ()
+
+    def sheet_id_for(self, title: str) -> int | None:
+        for sheet in self.sheets:
+            if sheet.title == title:
+                return sheet.sheet_id
+        return None
+
+
+@dataclass(frozen=True, slots=True)
+class GridCell:
+    """One cell as the provider computed it, not merely as it was written.
+
+    ``formula`` is the user-entered formula text and ``literal`` the user-entered
+    constant. ``value`` is the effective value the provider computed and
+    ``error`` is the provider's error type when evaluation failed. A cell with a
+    formula and an ``error`` is a formula that was written successfully but did
+    not execute successfully, which is the distinction a plain values read
+    cannot make.
+    """
+
+    address: str
+    formula: str | None = None
+    literal: str | None = None
+    value: str | None = None
+    error: str | None = None
+    formatted: str | None = None
+
+    @property
+    def has_error(self) -> bool:
+        return self.error is not None
 
 
 class GoogleSheetsClient:
@@ -99,22 +173,53 @@ class GoogleSheetsClient:
 
     def get_metadata(self, spreadsheet_id: str) -> SpreadsheetMetadata:
         response = self._transport.get_spreadsheet(spreadsheet_id)
-        sheets = response.get("sheets") if isinstance(response, dict) else None
+        if not isinstance(response, dict):
+            raise _malformed_response()
+        sheets = response.get("sheets")
         if not isinstance(sheets, list):
             raise _malformed_response()
 
-        titles: list[str] = []
+        properties = response.get("properties")
+        time_zone: str | None = None
+        locale: str | None = None
+        if properties is not None:
+            if not isinstance(properties, dict):
+                raise _malformed_response()
+            raw_time_zone = properties.get("timeZone")
+            if raw_time_zone is not None:
+                if not isinstance(raw_time_zone, str):
+                    raise _malformed_response()
+                time_zone = raw_time_zone
+            raw_locale = properties.get("locale")
+            if raw_locale is not None:
+                if not isinstance(raw_locale, str):
+                    raise _malformed_response()
+                locale = raw_locale
+
+        parsed: list[SheetProperties] = []
         for sheet in sheets:
             if not isinstance(sheet, dict):
                 raise _malformed_response()
-            properties = sheet.get("properties")
-            if not isinstance(properties, dict):
+            sheet_properties = sheet.get("properties")
+            if not isinstance(sheet_properties, dict):
                 raise _malformed_response()
-            title = properties.get("title")
+            title = sheet_properties.get("title")
             if not isinstance(title, str):
                 raise _malformed_response()
-            titles.append(title)
-        return SpreadsheetMetadata(titles=tuple(titles))
+            raw_sheet_id = sheet_properties.get("sheetId")
+            sheet_id: int | None = None
+            if raw_sheet_id is not None:
+                if isinstance(raw_sheet_id, bool) or not isinstance(raw_sheet_id, int):
+                    raise _malformed_response()
+                sheet_id = raw_sheet_id
+            parsed.append(SheetProperties(title=title, sheet_id=sheet_id))
+
+        return SpreadsheetMetadata(
+            titles=tuple(sheet.title for sheet in parsed),
+            time_zone=time_zone,
+            locale=locale,
+            sheets=tuple(parsed),
+        )
 
     def get_header_rows(
         self,
@@ -162,11 +267,17 @@ class GoogleSheetsClient:
         self,
         spreadsheet_id: str,
         ranges: Sequence[str],
+        *,
+        value_render_option: str | None = None,
     ) -> dict[str, list[list[str]]]:
         """Read whole-column or row ranges in one bounded batch.
 
         Each returned value list starts at the first row of its range, so a
         caller can derive the spreadsheet row number from the list index.
+
+        The default render is the API default (``FORMATTED_VALUE``). Passing
+        ``FORMULA_RENDER_OPTION`` returns formula text instead of the displayed
+        value, which is how an empty-string formula stays visible as content.
         """
 
         if not ranges:
@@ -176,7 +287,14 @@ class GoogleSheetsClient:
                 "batch_too_large",
                 "The Google Sheets read batch exceeds the configured limit.",
             )
-        response = self._transport.batch_get_values(spreadsheet_id, list(ranges))
+        if value_render_option is None:
+            response = self._transport.batch_get_values(spreadsheet_id, list(ranges))
+        else:
+            response = self._transport.batch_get_values_with_render(
+                spreadsheet_id,
+                list(ranges),
+                value_render_option=value_render_option,
+            )
         value_ranges = response.get("valueRanges") if isinstance(response, dict) else None
         if not isinstance(value_ranges, list) or len(value_ranges) != len(ranges):
             raise _malformed_response()
@@ -226,6 +344,28 @@ class GoogleSheetsClient:
             value_input_option=RAW_INPUT_OPTION,
         )
 
+    def get_grid(
+        self,
+        spreadsheet_id: str,
+        ranges: Sequence[str],
+    ) -> dict[str, list[list[GridCell]]]:
+        """Read cells with their formula, effective value, and error state.
+
+        This is the only read that can tell "the formula was written" apart from
+        "the formula computed". ``values.get`` returns displayed text, so a
+        ``#ERROR!`` and a correct number look equally like strings.
+        """
+
+        if not ranges:
+            return {}
+        if len(ranges) > self._max_batch_ranges:
+            raise GoogleSheetsError(
+                "batch_too_large",
+                "The Google Sheets read batch exceeds the configured limit.",
+            )
+        response = self._transport.get_spreadsheet_grid(spreadsheet_id, list(ranges))
+        return _parse_grid_response(response, ranges)
+
     def add_tabs(
         self,
         spreadsheet_id: str,
@@ -242,6 +382,34 @@ class GoogleSheetsClient:
         return self._transport.batch_update_spreadsheet(
             spreadsheet_id,
             requests,
+        )
+
+    def batch_update(
+        self,
+        spreadsheet_id: str,
+        requests: Sequence[dict[str, Any]],
+    ) -> dict[str, Any]:
+        """Send structured ``spreadsheets.batchUpdate`` requests.
+
+        This is the only path that can carry a ``formulaValue`` or a formatting
+        request. It is deliberately separate from :meth:`batch_update_values`,
+        which stays locked to ``RAW`` so canonical job text is never parsed as a
+        formula.
+        """
+
+        if not requests:
+            raise GoogleSheetsError(
+                "invalid_request",
+                "At least one Google Sheets batch update request is required.",
+            )
+        if len(requests) > self._max_batch_ranges:
+            raise GoogleSheetsError(
+                "batch_too_large",
+                "The Google Sheets batch update exceeds the configured limit.",
+            )
+        return self._transport.batch_update_spreadsheet(
+            spreadsheet_id,
+            list(requests),
         )
 
     def write_headers(
@@ -286,6 +454,271 @@ def _malformed_response() -> GoogleSheetsError:
     )
 
 
+def _grid_effective_value(value: dict[str, Any]) -> tuple[str | None, str | None]:
+    """Return ``(effective_value, error_type)`` for one ``effectiveValue``."""
+
+    if not isinstance(value, dict):
+        raise _malformed_response()
+    error = value.get("errorValue")
+    if error is not None:
+        if not isinstance(error, dict):
+            raise _malformed_response()
+        error_type = error.get("type")
+        if not isinstance(error_type, str):
+            raise _malformed_response()
+        return None, error_type
+    for key in ("numberValue", "stringValue", "boolValue"):
+        if key in value:
+            raw = value[key]
+            if isinstance(raw, bool):
+                return ("TRUE" if raw else "FALSE"), None
+            if raw is None:
+                return "", None
+            return str(raw), None
+    return None, None
+
+
+def _parse_grid_cell(raw: Any, row_index: int, column_index: int) -> GridCell:
+    if not isinstance(raw, dict):
+        raise _malformed_response()
+    entered = raw.get("userEnteredValue")
+    formula: str | None = None
+    literal: str | None = None
+    if entered is not None:
+        if not isinstance(entered, dict):
+            raise _malformed_response()
+        raw_formula = entered.get("formulaValue")
+        if raw_formula is not None:
+            if not isinstance(raw_formula, str):
+                raise _malformed_response()
+            formula = raw_formula
+        for key in ("stringValue", "numberValue", "boolValue"):
+            if key in entered:
+                raw_literal = entered[key]
+                literal = (
+                    ("TRUE" if raw_literal else "FALSE")
+                    if isinstance(raw_literal, bool)
+                    else ("" if raw_literal is None else str(raw_literal))
+                )
+                break
+    effective = raw.get("effectiveValue")
+    value, error = (None, None) if effective is None else _grid_effective_value(effective)
+    formatted = raw.get("formattedValue")
+    if formatted is not None and not isinstance(formatted, str):
+        raise _malformed_response()
+    return GridCell(
+        address=f"{column_letter(column_index + 1)}{row_index + 1}",
+        formula=formula,
+        literal=literal,
+        value=value,
+        error=error,
+        formatted=formatted,
+    )
+
+
+_A1_RANGE = re.compile(
+    r"^(?:'(?P<quoted>(?:[^']|'')+)'|(?P<plain>[^!]+))!"
+    r"\$?(?P<start_column>[A-Za-z]+)\$?(?P<start_row>\d+)"
+    r"(?::\$?(?P<end_column>[A-Za-z]+)\$?(?P<end_row>\d+))?$"
+)
+
+
+@dataclass(frozen=True, slots=True)
+class _RangeBounds:
+    """One requested A1 range, resolved to a 1-based rectangle."""
+
+    title: str
+    start_row: int
+    start_column: int
+    end_row: int
+    end_column: int
+
+
+@dataclass(frozen=True, slots=True)
+class _GridBlock:
+    """One provider ``GridData`` block and its absolute position."""
+
+    start_row: int
+    start_column: int
+    rows: tuple[Any, ...]
+    width: int
+
+    @property
+    def end_row(self) -> int:
+        return self.start_row + len(self.rows) - 1
+
+    @property
+    def end_column(self) -> int:
+        return self.start_column + self.width - 1
+
+
+def _column_index(letters: str) -> int:
+    index = 0
+    for character in letters.upper():
+        index = index * 26 + (ord(character) - ord("A") + 1)
+    return index
+
+
+def _parse_range(range_name: str) -> _RangeBounds:
+    match = _A1_RANGE.match(range_name.strip())
+    if match is None:
+        raise GoogleSheetsError(
+            "invalid_range",
+            "A requested grid range is not valid A1 notation.",
+        )
+    title = (match.group("quoted") or match.group("plain")).replace("''", "'")
+    start_row = int(match.group("start_row"))
+    end_row = int(match.group("end_row") or start_row)
+    start_column = _column_index(match.group("start_column"))
+    end_column = _column_index(match.group("end_column") or match.group("start_column"))
+    if start_row < 1 or end_row < start_row or end_column < start_column:
+        raise GoogleSheetsError(
+            "invalid_range",
+            "A requested grid range is not valid A1 notation.",
+        )
+    return _RangeBounds(
+        title=title,
+        start_row=start_row,
+        start_column=start_column,
+        end_row=end_row,
+        end_column=end_column,
+    )
+
+
+def _grid_block(raw: Any) -> _GridBlock:
+    if not isinstance(raw, dict):
+        raise _malformed_response()
+    start_row = raw.get("startRow")
+    start_column = raw.get("startColumn")
+    start_row = 0 if start_row is None else start_row
+    start_column = 0 if start_column is None else start_column
+    if (
+        not isinstance(start_row, int)
+        or not isinstance(start_column, int)
+        or start_row < 0
+        or start_column < 0
+    ):
+        raise _malformed_response()
+    row_data = raw.get("rowData")
+    if row_data is None:
+        row_data = []
+    if not isinstance(row_data, list):
+        raise _malformed_response()
+    rows: list[Any] = []
+    width = 0
+    for row in row_data:
+        if not isinstance(row, dict):
+            raise _malformed_response()
+        values = row.get("values")
+        if values is None:
+            values = []
+        if not isinstance(values, list):
+            raise _malformed_response()
+        rows.append(values)
+        width = max(width, len(values))
+    return _GridBlock(
+        start_row=start_row,
+        start_column=start_column,
+        rows=tuple(rows),
+        width=width,
+    )
+
+
+def _block_contains(block: _GridBlock, bounds: _RangeBounds) -> bool:
+    """Compare a 0-based provider block with a 1-based A1 rectangle."""
+
+    return (
+        block.start_row + 1 <= bounds.start_row
+        and block.start_column + 1 <= bounds.start_column
+        and block.end_row + 1 >= bounds.end_row
+        and block.end_column + 1 >= bounds.end_column
+    )
+
+
+def _slice_block(block: _GridBlock, bounds: _RangeBounds) -> list[list[GridCell]]:
+    """Return the requested rectangle, with inert cells for absent positions."""
+
+    sliced: list[list[GridCell]] = []
+    for row_index in range(bounds.start_row, bounds.end_row + 1):
+        offset = (row_index - 1) - block.start_row
+        values = block.rows[offset] if 0 <= offset < len(block.rows) else ()
+        row: list[GridCell] = []
+        for column_index in range(bounds.start_column, bounds.end_column + 1):
+            position = (column_index - 1) - block.start_column
+            if 0 <= position < len(values):
+                row.append(_parse_grid_cell(values[position], row_index - 1, column_index - 1))
+            else:
+                row.append(
+                    GridCell(
+                        address=f"{column_letter(column_index)}{row_index}",
+                    )
+                )
+        sliced.append(row)
+    return sliced
+
+
+def _parse_grid_response(
+    response: Any,
+    ranges: Sequence[str],
+) -> dict[str, list[list[GridCell]]]:
+    """Map one provider grid response onto the requested ranges.
+
+    The provider groups data by sheet, in no guaranteed request order, and emits
+    one ``data`` block per requested range that intersects a sheet. Mapping by
+    request position is therefore wrong: a 25-cell read of one tab comes back as
+    one sheet with 25 blocks, and a two-sheet read can come back reversed. Ranges
+    are matched by sheet title and by the block whose rectangle contains the
+    requested rectangle; a range that no block covers is simply empty.
+    """
+
+    if not isinstance(response, dict):
+        raise _malformed_response()
+    sheets = response.get("sheets")
+    if not isinstance(sheets, list):
+        raise _malformed_response()
+
+    blocks_by_title: dict[str, list[_GridBlock]] = {}
+    for sheet in sheets:
+        if not isinstance(sheet, dict):
+            raise _malformed_response()
+        properties = sheet.get("properties")
+        if not isinstance(properties, dict):
+            raise _malformed_response()
+        title = properties.get("title")
+        if not isinstance(title, str) or not title:
+            raise _malformed_response()
+        data = sheet.get("data")
+        if data is None:
+            data = []
+        if not isinstance(data, list):
+            raise _malformed_response()
+        blocks_by_title.setdefault(title, []).extend(_grid_block(entry) for entry in data)
+
+    result: dict[str, list[list[GridCell]]] = {}
+    for requested in ranges:
+        bounds = _parse_range(requested)
+        blocks = blocks_by_title.get(bounds.title, [])
+        # The provider emits one block per requested range, starting exactly at
+        # that range's first cell. Trailing empty cells are trimmed from
+        # ``rowData``, so the observed width is a lower bound, never the extent:
+        # an exact start match is therefore authoritative, and a containing
+        # block is only a fallback for providers that merge adjacent ranges.
+        exact = [
+            block
+            for block in blocks
+            if block.start_row + 1 == bounds.start_row
+            and block.start_column + 1 == bounds.start_column
+        ]
+        covering = [block for block in blocks if _block_contains(block, bounds)]
+        candidates = exact or covering
+        if not candidates:
+            result[requested] = []
+            continue
+        best = min(candidates, key=lambda block: (len(block.rows), block.width))
+        result[requested] = _slice_block(best, bounds)
+    return result
+
+
 class GoogleApiSheetsTransport:
     """Official Google API client wrapped with sanitized error translation."""
 
@@ -311,6 +744,42 @@ class GoogleApiSheetsTransport:
                 spreadsheetId=spreadsheet_id,
                 ranges=ranges,
             )
+        )
+        return self._execute(request)
+
+    def batch_get_values_with_render(
+        self,
+        spreadsheet_id: str,
+        ranges: list[str],
+        *,
+        value_render_option: str,
+    ) -> dict[str, Any]:
+        request = (
+            self._service.spreadsheets()
+            .values()
+            .batchGet(
+                spreadsheetId=spreadsheet_id,
+                ranges=ranges,
+                valueRenderOption=value_render_option,
+            )
+        )
+        return self._execute(request)
+
+    def get_spreadsheet_grid(
+        self,
+        spreadsheet_id: str,
+        ranges: list[str],
+    ) -> dict[str, Any]:
+        """Read grids including formula text, effective values, and errors."""
+
+        request = self._service.spreadsheets().get(
+            spreadsheetId=spreadsheet_id,
+            ranges=ranges,
+            includeGridData=True,
+            fields=(
+                "sheets(properties,data(startRow,startColumn,rowData(values("
+                "userEnteredValue,effectiveValue,formattedValue))))"
+            ),
         )
         return self._execute(request)
 
@@ -368,14 +837,22 @@ def build_google_sheets_service(
     credentials: Any,
     timeout_seconds: float,
 ) -> Any:
-    """Build a Sheets v4 service pinned to the official API origin."""
+    """Build a Sheets v4 service pinned to the official API origin.
+
+    ``googleapiclient.discovery.build`` rejects ``http`` and ``credentials``
+    together ("Arguments http and credentials are mutually exclusive"), so the
+    credentials are composed into the HTTP layer with ``AuthorizedHttp``
+    instead. The configured timeout therefore lives on the wrapped
+    ``httplib2.Http`` instance, and the service still authenticates with the
+    user's Google OAuth credentials.
+    """
 
     http = httplib2.Http(timeout=timeout_seconds)
+    authorized_http = AuthorizedHttp(credentials, http=http)
     return build(
         "sheets",
         "v4",
-        http=http,
-        credentials=credentials,
+        http=authorized_http,
         cache_discovery=False,
         static_discovery=True,
         client_options={"api_endpoint": SHEETS_API_ORIGIN},

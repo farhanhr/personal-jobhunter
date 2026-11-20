@@ -368,6 +368,257 @@ def test_transport_maps_timeouts() -> None:
 
 
 def test_service_builder_pins_the_official_origin_and_timeout(monkeypatch) -> None:
+    from google_auth_httplib2 import AuthorizedHttp
+
+    captured: dict[str, Any] = {}
+
+    def fake_build(service_name: str, version: str, **kwargs: Any) -> object:
+        captured.update(kwargs)
+        captured["service"] = (service_name, version)
+        return object()
+
+    monkeypatch.setattr(client_module, "build", fake_build)
+    credentials = FakeUserCredentials()
+
+    client_module.build_google_sheets_service(
+        credentials=credentials,
+        timeout_seconds=7.5,
+    )
+
+    assert captured["service"] == ("sheets", "v4")
+    assert captured["client_options"] == {"api_endpoint": SHEETS_API_ORIGIN}
+    assert captured["static_discovery"] is True
+    assert captured["cache_discovery"] is False
+
+    authorized = captured["http"]
+    assert isinstance(authorized, AuthorizedHttp)
+    assert authorized.credentials is credentials
+    assert isinstance(authorized.http, httplib2.Http)
+    assert authorized.http.timeout == 7.5
+    assert "credentials" not in captured
+
+
+def test_metadata_exposes_the_time_zone_and_sheet_ids() -> None:
+    transport = FakeTransport(
+        metadata={
+            "properties": {"timeZone": "Asia/Jakarta"},
+            "sheets": [
+                {"properties": {"sheetId": 0, "title": "Opportunities"}},
+                {"properties": {"sheetId": 1730000123, "title": "Job_Sources"}},
+            ],
+        }
+    )
+
+    metadata = GoogleSheetsClient(transport).get_metadata("spreadsheet")
+
+    assert metadata.titles == ("Opportunities", "Job_Sources")
+    assert metadata.time_zone == "Asia/Jakarta"
+    assert metadata.sheet_id_for("Job_Sources") == 1730000123
+    assert metadata.sheet_id_for("Dashboard") is None
+
+
+def test_metadata_without_optional_fields_keeps_preflight_working() -> None:
+    transport = FakeTransport(metadata={"sheets": [{"properties": {"title": "Opportunities"}}]})
+
+    metadata = GoogleSheetsClient(transport).get_metadata("spreadsheet")
+
+    assert metadata.titles == ("Opportunities",)
+    assert metadata.time_zone is None
+    assert metadata.sheet_id_for("Opportunities") is None
+
+
+def test_metadata_rejects_a_non_integer_sheet_id() -> None:
+    transport = FakeTransport(
+        metadata={"sheets": [{"properties": {"sheetId": "0", "title": "Opportunities"}}]}
+    )
+
+    with pytest.raises(GoogleSheetsError) as captured:
+        GoogleSheetsClient(transport).get_metadata("spreadsheet")
+
+    assert captured.value.code == "malformed_response"
+
+
+def test_metadata_rejects_a_non_string_time_zone() -> None:
+    transport = FakeTransport(
+        metadata={
+            "properties": {"timeZone": 7},
+            "sheets": [{"properties": {"title": "Opportunities"}}],
+        }
+    )
+
+    with pytest.raises(GoogleSheetsError) as captured:
+        GoogleSheetsClient(transport).get_metadata("spreadsheet")
+
+    assert captured.value.code == "malformed_response"
+
+
+def test_batch_update_sends_structured_requests_in_one_call() -> None:
+    transport = FakeTransport()
+    requests = [{"updateCells": {"start": {"sheetId": 4}}}]
+
+    GoogleSheetsClient(transport).batch_update("spreadsheet", requests)
+
+    assert transport.calls == [
+        ("batch_update_spreadsheet", ("spreadsheet", requests)),
+    ]
+
+
+def test_batch_update_rejects_empty_requests() -> None:
+    transport = FakeTransport()
+
+    with pytest.raises(GoogleSheetsError) as captured:
+        GoogleSheetsClient(transport).batch_update("spreadsheet", [])
+
+    assert captured.value.code == "invalid_request"
+    assert transport.calls == []
+
+
+def test_batch_update_rejects_more_requests_than_the_configured_bound() -> None:
+    transport = FakeTransport()
+    client = GoogleSheetsClient(transport, max_batch_ranges=1)
+
+    with pytest.raises(GoogleSheetsError) as captured:
+        client.batch_update("spreadsheet", [{"a": 1}, {"b": 2}])
+
+    assert captured.value.code == "batch_too_large"
+    assert transport.calls == []
+
+
+def test_structured_updates_never_touch_the_raw_values_path() -> None:
+    transport = FakeTransport()
+    client = GoogleSheetsClient(transport)
+
+    client.batch_update("spreadsheet", [{"updateCells": {}}])
+
+    assert [name for name, _ in transport.calls] == ["batch_update_spreadsheet"]
+
+
+def test_formula_render_read_is_routed_to_the_render_transport() -> None:
+    transport = FakeTransport(value_ranges=[{"values": [['=IF(1=2,"a","")']]}])
+    transport.render_calls = []  # type: ignore[attr-defined]
+
+    def batch_get_values_with_render(
+        spreadsheet_id: str,
+        ranges: list[str],
+        *,
+        value_render_option: str,
+    ) -> dict[str, Any]:
+        transport.render_calls.append(  # type: ignore[attr-defined]
+            (spreadsheet_id, tuple(ranges), value_render_option)
+        )
+        return {"valueRanges": transport.value_ranges}
+
+    transport.batch_get_values_with_render = batch_get_values_with_render  # type: ignore[attr-defined]
+
+    values = GoogleSheetsClient(transport).get_values(
+        "spreadsheet",
+        ["Dashboard"],
+        value_render_option="FORMULA",
+    )
+
+    assert values == {"Dashboard": [['=IF(1=2,"a","")']]}
+    assert transport.render_calls == [("spreadsheet", ("Dashboard",), "FORMULA")]  # type: ignore[attr-defined]
+    assert transport.calls == []
+
+
+def test_the_default_read_never_uses_the_formula_render() -> None:
+    transport = FakeTransport(value_ranges=[{"values": [["Applied"]]}])
+
+    values = GoogleSheetsClient(transport).get_values("spreadsheet", ["Dashboard!A1"])
+
+    assert values == {"Dashboard!A1": [["Applied"]]}
+    assert transport.calls == [
+        ("batch_get_values", ("spreadsheet", ("Dashboard!A1",))),
+    ]
+
+
+def test_transport_passes_the_render_option_to_the_official_client() -> None:
+    values = FakeValuesResource()
+    values.kwargs = {}
+    transport = GoogleApiSheetsTransport(FakeService(values))
+
+    def batchGet(**kwargs: Any) -> Any:
+        values.kwargs = kwargs
+        return FakeRequest(result={"valueRanges": []})
+
+    values.batchGet = batchGet  # type: ignore[attr-defined]
+
+    transport.batch_get_values_with_render(
+        "spreadsheet",
+        ["Dashboard"],
+        value_render_option="FORMULA",
+    )
+
+    assert values.kwargs == {  # type: ignore[attr-defined]
+        "spreadsheetId": "spreadsheet",
+        "ranges": ["Dashboard"],
+        "valueRenderOption": "FORMULA",
+    }
+
+
+# ------------------------------------- service construction: http vs credentials
+
+
+class FakeUserCredentials:
+    """A credentials double that can never reach the network."""
+
+    def __init__(self) -> None:
+        self.before_request_calls: list[object] = []
+        self.expired = False
+        self.refresh_token = "test-refresh-token"
+
+    def before_request(self, request: object, method: str, url: str, headers: object) -> None:
+        self.before_request_calls.append((request, method, url, headers))
+
+
+def test_the_service_is_built_with_authorized_http() -> None:
+    from google_auth_httplib2 import AuthorizedHttp
+
+    credentials = FakeUserCredentials()
+
+    service = client_module.build_google_sheets_service(
+        credentials=credentials,
+        timeout_seconds=7.5,
+    )
+
+    assert isinstance(service._http, AuthorizedHttp)
+
+
+def test_authorized_http_wraps_the_configured_httplib2_client() -> None:
+    from google_auth_httplib2 import AuthorizedHttp
+
+    service = client_module.build_google_sheets_service(
+        credentials=FakeUserCredentials(),
+        timeout_seconds=7.5,
+    )
+    authorized = service._http
+
+    assert isinstance(authorized, AuthorizedHttp)
+    assert isinstance(authorized.http, httplib2.Http)
+    assert not isinstance(authorized.http, AuthorizedHttp)
+
+
+def test_the_underlying_http_timeout_is_preserved() -> None:
+    service = client_module.build_google_sheets_service(
+        credentials=FakeUserCredentials(),
+        timeout_seconds=12.25,
+    )
+
+    assert service._http.http.timeout == 12.25
+
+
+def test_the_google_credentials_are_attached_to_authorized_http() -> None:
+    credentials = FakeUserCredentials()
+
+    service = client_module.build_google_sheets_service(
+        credentials=credentials,
+        timeout_seconds=7.5,
+    )
+
+    assert service._http.credentials is credentials
+
+
+def test_build_receives_http_but_never_credentials(monkeypatch) -> None:
     captured: dict[str, Any] = {}
 
     def fake_build(service_name: str, version: str, **kwargs: Any) -> object:
@@ -378,13 +629,104 @@ def test_service_builder_pins_the_official_origin_and_timeout(monkeypatch) -> No
     monkeypatch.setattr(client_module, "build", fake_build)
 
     client_module.build_google_sheets_service(
-        credentials=object(),
+        credentials=FakeUserCredentials(),
         timeout_seconds=7.5,
     )
 
-    assert captured["service"] == ("sheets", "v4")
+    assert "http" in captured
+    assert "credentials" not in captured, "http and credentials are mutually exclusive"
+
+
+def test_the_official_origin_and_discovery_flags_are_unchanged(monkeypatch) -> None:
+    captured: dict[str, Any] = {}
+
+    def fake_build(service_name: str, version: str, **kwargs: Any) -> object:
+        captured.update(kwargs)
+        return object()
+
+    monkeypatch.setattr(client_module, "build", fake_build)
+
+    client_module.build_google_sheets_service(
+        credentials=FakeUserCredentials(),
+        timeout_seconds=7.5,
+    )
+
     assert captured["client_options"] == {"api_endpoint": SHEETS_API_ORIGIN}
     assert captured["static_discovery"] is True
     assert captured["cache_discovery"] is False
-    assert isinstance(captured["http"], httplib2.Http)
-    assert captured["http"].timeout == 7.5
+
+
+def test_the_real_build_accepts_the_constructed_arguments() -> None:
+    """Call the real googleapiclient build with static discovery.
+
+    This is the assertion the mock-only test was missing: the real builder
+    rejects ``http`` together with ``credentials`` before any network call, so a
+    regression cannot hide behind a fake ``build``. No Google request is made.
+    """
+
+    credentials = FakeUserCredentials()
+
+    service = client_module.build_google_sheets_service(
+        credentials=credentials,
+        timeout_seconds=7.5,
+    )
+
+    assert service is not None
+    assert service._http.credentials is credentials
+    # Static discovery is in effect, so the resource tree is already populated.
+    assert service.spreadsheets() is not None
+
+
+def test_metadata_exposes_the_spreadsheet_locale() -> None:
+    transport = FakeTransport(
+        metadata={
+            "properties": {"timeZone": "Asia/Jakarta", "locale": "id_ID"},
+            "sheets": [{"properties": {"sheetId": 0, "title": "Opportunities"}}],
+        }
+    )
+
+    metadata = GoogleSheetsClient(transport).get_metadata("spreadsheet")
+
+    assert metadata.locale == "id_ID"
+    assert metadata.time_zone == "Asia/Jakarta"
+
+
+def test_metadata_without_a_locale_reports_none() -> None:
+    transport = FakeTransport(
+        metadata={
+            "properties": {"timeZone": "Asia/Jakarta"},
+            "sheets": [{"properties": {"title": "Opportunities"}}],
+        }
+    )
+
+    metadata = GoogleSheetsClient(transport).get_metadata("spreadsheet")
+
+    assert metadata.locale is None
+
+
+def test_metadata_rejects_a_non_string_locale() -> None:
+    transport = FakeTransport(
+        metadata={
+            "properties": {"locale": 42},
+            "sheets": [{"properties": {"title": "Opportunities"}}],
+        }
+    )
+
+    with pytest.raises(GoogleSheetsError) as captured:
+        GoogleSheetsClient(transport).get_metadata("spreadsheet")
+
+    assert captured.value.code == "malformed_response"
+
+
+def test_metadata_keeps_the_raw_indonesian_locale_alias() -> None:
+    transport = FakeTransport(
+        metadata={
+            "properties": {"timeZone": "Asia/Jakarta", "locale": "in_ID"},
+            "sheets": [{"properties": {"sheetId": 0, "title": "Opportunities"}}],
+        }
+    )
+
+    metadata = GoogleSheetsClient(transport).get_metadata("spreadsheet")
+
+    assert metadata.locale == "in_ID"
+    assert metadata.time_zone == "Asia/Jakarta"

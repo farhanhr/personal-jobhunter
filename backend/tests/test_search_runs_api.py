@@ -270,6 +270,36 @@ def test_start_rejects_before_reservation_when_sheets_cannot_be_read(
     assert _run_count(engine) == 0
 
 
+def test_a_rate_limited_snapshot_rejects_before_reservation(
+    engine: Engine,
+    seed_config,
+) -> None:
+    """A throttled Sheets read must not consume quota or create a run row."""
+
+    seed_config()
+
+    class RateLimitedTransport(_RefreshTransport):
+        def batch_get_values(self, spreadsheet_id: str, ranges: list[str]) -> dict:
+            raise GoogleSheetsError(
+                "rate_limited",
+                "Google Sheets rate-limited the request. Try again later.",
+                retry_after_seconds=30,
+            )
+
+    with _client(
+        engine,
+        wib(2026, 11, 12, 7, 0),
+        transport=RateLimitedTransport(),
+    ) as client:
+        response = _post(client)
+
+    assert response.status_code == 503
+    payload = response.json()["error"]
+    assert payload["code"] == "sheets_refresh_unavailable"
+    assert payload["details"]["reason"] == "rate_limited"
+    assert _run_count(engine) == 0
+
+
 def test_start_rejects_blocked_company_even_if_factory_could_build_it(
     engine: Engine,
     seed_config,

@@ -21,6 +21,10 @@ from personal_job_finder_api.integrations.google_sheets.credentials import (
     CredentialStore,
     build_credential_store,
 )
+from personal_job_finder_api.integrations.google_sheets.dashboard import (
+    DashboardInitResult,
+    DashboardInitService,
+)
 from personal_job_finder_api.integrations.google_sheets.oauth import (
     GoogleSheetsCredentialsProvider,
     build_google_credentials_provider,
@@ -45,6 +49,11 @@ class GoogleSheetsFoundation:
 
     def initialize(self) -> PreflightResult:
         return self.preflight.initialize(self.config.spreadsheet_id)
+
+    def initialize_dashboard(self) -> DashboardInitResult:
+        """Create and initialize the optional Dashboard tab."""
+
+        return DashboardInitService(self.client, self.config.spreadsheet_id).initialize()
 
 
 def build_google_sheets_transport(settings: Settings) -> SheetsTransport:

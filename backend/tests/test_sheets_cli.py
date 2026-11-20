@@ -16,6 +16,18 @@ from personal_job_finder_api.integrations.google_sheets.preflight import (
 SPREADSHEET_ID = "test_spreadsheet_id_1234567890"
 
 
+@pytest.fixture(autouse=True)
+def _stub_migrations(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Never touch a real database from a CLI test.
+
+    ``sync``/``recover``/``requeue`` prepare the schema before touching the outbox.
+    A test that exercised the real function would create files under the user's
+    data directory, so the default is a no-op; the tests that care patch it again.
+    """
+
+    monkeypatch.setattr(cli_module, "run_migrations", lambda _url: None)
+
+
 class ReadyTransport:
     def get_spreadsheet(self, spreadsheet_id: str) -> dict[str, Any]:
         from personal_job_finder_api.integrations.google_sheets.config import (
@@ -256,3 +268,191 @@ def test_auth_failure_returns_a_nonzero_exit_code_without_traceback(
     assert exit_code == 1
     assert "oauth_state_mismatch" in output.err
     assert "Traceback" not in output.err
+
+
+class StubDashboardFoundation:
+    def __init__(
+        self,
+        *,
+        result: Any = None,
+        error: Exception | None = None,
+    ) -> None:
+        self._result = result
+        self._error = error
+        self.dashboard_calls = 0
+
+    def check(self) -> PreflightResult:
+        raise AssertionError("dashboard-init must not run preflight")
+
+    def initialize(self) -> PreflightResult:
+        raise AssertionError("dashboard-init must not run canonical init")
+
+    def initialize_dashboard(self) -> Any:
+        self.dashboard_calls += 1
+        if self._error is not None:
+            raise self._error
+        return self._result
+
+
+def test_dashboard_init_is_an_explicit_command() -> None:
+    parser = cli_module._build_parser()
+
+    arguments = parser.parse_args(["dashboard-init"])
+
+    assert arguments.command == "dashboard-init"
+
+
+def test_dashboard_init_prints_the_success_message(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    from personal_job_finder_api.integrations.google_sheets.dashboard import (
+        DashboardInitResult,
+        DashboardInitState,
+    )
+
+    foundation = StubDashboardFoundation(
+        result=DashboardInitResult(
+            state=DashboardInitState.CREATED,
+            message="Dashboard tab created and initialized.",
+        )
+    )
+    monkeypatch.setattr(
+        cli_module,
+        "build_google_sheets_foundation",
+        lambda settings: foundation,
+    )
+
+    exit_code = cli_module.main(["dashboard-init"])
+
+    output = capsys.readouterr()
+    assert exit_code == 0
+    assert "Dashboard tab created and initialized." in output.out
+    assert foundation.dashboard_calls == 1
+    assert SPREADSHEET_ID not in output.out
+    assert SPREADSHEET_ID not in output.err
+
+
+def test_dashboard_init_reports_a_refusal_with_a_stable_code(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    foundation = StubDashboardFoundation(
+        error=GoogleSheetsError(
+            "dashboard_tab_not_owned",
+            "The Dashboard tab already contains data.",
+        )
+    )
+    monkeypatch.setattr(
+        cli_module,
+        "build_google_sheets_foundation",
+        lambda settings: foundation,
+    )
+
+    exit_code = cli_module.main(["dashboard-init"])
+
+    output = capsys.readouterr()
+    assert exit_code == 1
+    assert "dashboard_tab_not_owned" in output.err
+    assert SPREADSHEET_ID not in output.out
+    assert SPREADSHEET_ID not in output.err
+
+
+def test_canonical_init_never_calls_the_dashboard_initializer(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    foundation = StubDashboardFoundation()
+    monkeypatch.setattr(
+        cli_module,
+        "build_google_sheets_foundation",
+        lambda settings: _CanonicalInitFoundation(foundation),
+    )
+
+    exit_code = cli_module.main(["init"])
+
+    capsys.readouterr()
+    assert exit_code == 0
+    assert foundation.dashboard_calls == 0
+
+
+class _CanonicalInitFoundation:
+    """A foundation whose canonical init works and whose dashboard path must not run."""
+
+    def __init__(self, dashboard: StubDashboardFoundation) -> None:
+        self._dashboard = dashboard
+
+    def initialize(self) -> PreflightResult:
+        return _ready_result()
+
+    def initialize_dashboard(self) -> Any:
+        return self._dashboard.initialize_dashboard()
+
+
+def test_sync_prepares_the_local_schema_before_dispatching(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """Regression: a fresh data directory made `sync` fail with "no such table"."""
+
+    from personal_job_finder_api.sync.dispatcher import SyncOutcome
+
+    prepared: list[str] = []
+
+    class StubConfig:
+        spreadsheet_id = SPREADSHEET_ID
+        batch_size = 25
+        max_batch_ranges = 100
+
+    class StubFoundation:
+        config = StubConfig()
+        transport = object()
+
+    class StubDispatcher:
+        def __init__(self, engine, **_kwargs) -> None:
+            pass
+
+        def dispatch_due(self) -> SyncOutcome:
+            return SyncOutcome(synced=0, failed=0, blocked=0, remaining=0)
+
+    class StubEngine:
+        def dispose(self) -> None:
+            pass
+
+    monkeypatch.setattr(cli_module, "run_migrations", prepared.append)
+    monkeypatch.setattr(
+        cli_module, "build_google_sheets_foundation", lambda settings: StubFoundation()
+    )
+    monkeypatch.setattr(cli_module, "create_database_engine", lambda settings: StubEngine())
+    monkeypatch.setattr(cli_module, "SyncDispatcher", StubDispatcher)
+
+    exit_code = cli_module.main(["sync"])
+
+    assert exit_code == 0
+    assert len(prepared) == 1
+    assert prepared[0].endswith(".sqlite3")
+
+
+def test_a_database_failure_is_reported_with_a_stable_code(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    from sqlalchemy.exc import SQLAlchemyError
+
+    def failing(_url: str) -> None:
+        raise SQLAlchemyError("no such table: sync_outbox")
+
+    class StubEngine:
+        def dispose(self) -> None:
+            pass
+
+    monkeypatch.setattr(cli_module, "run_migrations", failing)
+    monkeypatch.setattr(cli_module, "create_database_engine", lambda settings: StubEngine())
+
+    exit_code = cli_module.main(["sync"])
+
+    output = capsys.readouterr()
+    assert exit_code == 1
+    assert "database_unavailable" in output.err
+    assert "Traceback" not in output.err
+    assert "sync_outbox" not in output.err

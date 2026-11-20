@@ -406,3 +406,38 @@ def test_an_unexpected_runtime_failure_is_recorded_and_sanitized(
     assert stored is not None
     assert stored["last_refresh_outcome"] == "failed"
     assert stored["last_refresh_error_code"] == "refresh_unexpected_error"
+
+
+class RangeRecordingTransport(FakeTransport):
+    """Records the exact ranges refresh asks for."""
+
+    def __init__(self, tabs: dict[str, list[list[str]]] | None = None) -> None:
+        super().__init__(tabs)
+        self.ranges: list[str] = []
+
+    def batch_get_values(
+        self,
+        spreadsheet_id: str,
+        ranges: list[str],
+    ) -> dict[str, Any]:
+        self.ranges.extend(ranges)
+        return super().batch_get_values(spreadsheet_id, ranges)
+
+
+def test_refresh_ignores_an_optional_dashboard_tab(engine: Engine) -> None:
+    transport = RangeRecordingTransport(
+        tabs={
+            "Opportunities": [list(OPPORTUNITY_HEADERS), opportunity_row()],
+            "Job_Sources": [list(JOB_SOURCE_HEADERS), source_row()],
+            "Dashboard": [["Job Search Dashboard — formula-only view"]],
+        }
+    )
+
+    result = service(engine, transport).refresh()
+
+    assert result.counts == {"opportunities": 1, "job_sources": 1}
+    assert transport.ranges
+    assert {requested.split("!", 1)[0] for requested in transport.ranges} == {
+        "Opportunities",
+        "Job_Sources",
+    }

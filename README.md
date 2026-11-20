@@ -118,20 +118,48 @@ browser, and the resulting token is kept in your operating system's credential s
    uv run python -m personal_job_finder_api.integrations.google_sheets.cli auth
    ```
 
-7. Check that the spreadsheet matches the expected layout:
+7. Check that the spreadsheet matches the expected layout. This command only reads;
+   it never writes:
 
    ```bash
    uv run python -m personal_job_finder_api.integrations.google_sheets.cli check
    ```
 
-   If tabs or header rows are missing, this creates them without overwriting anything
-   you have already written:
+   If a canonical tab or header row is missing, create the missing tabs and empty
+   header rows:
 
    ```bash
    uv run python -m personal_job_finder_api.integrations.google_sheets.cli init
    ```
 
-8. Copy new results into your sheet whenever you want:
+   `init` refuses to overwrite a non-empty header row that does not match the expected
+   schema. Fix that case by hand; nothing is rewritten for you.
+
+8. Optionally add the formula-only `Dashboard` tab:
+
+   ```bash
+   uv run python -m personal_job_finder_api.integrations.google_sheets.cli dashboard-init
+   ```
+
+   This tab is a companion summary, never a source of truth, and it is not required.
+   It refuses to run unless the spreadsheet time zone is `Asia/Jakarta` and the locale is
+   one it can write formulas for (`en_US`, `id_ID`, or its alias `in_ID`), and it refuses
+   to overwrite a `Dashboard` tab it did not create. Running it again after a successful
+   setup changes nothing. With only header rows, every opportunity, status, and source
+   metric shows `0`.
+
+   To check the tab without changing anything:
+
+   ```bash
+   uv run python -m personal_job_finder_api.integrations.google_sheets.cli dashboard-verify
+   ```
+
+   This reads the tab and both canonical tabs, recomputes every metric independently, and
+   reports any cell that shows an error, a constant instead of a formula, or a number that
+   disagrees. It exits non-zero on a mismatch. A `Dashboard` written by an older version of
+   this app is reported as unsupported: delete that tab and run `dashboard-init` again.
+
+9. Copy new results into your sheet whenever you want:
 
    ```bash
    uv run python -m personal_job_finder_api.integrations.google_sheets.cli sync
@@ -157,6 +185,10 @@ are queued for your sheet and the dashboard shows what was found.
 
 - All settings, limits, and pending work live in
   `~/.local/share/personal-job-finder/` on your computer.
+- To keep that directory inside the project instead, set `PJF_DATA_DIR` to a path under
+  `.local/`, for example `PJF_DATA_DIR=.local/share/personal-job-finder`. `.local/` and
+  every `*.sqlite3` file are ignored by Git, so the data stays on your machine and is
+  never committed. Deleting that one directory removes all of it.
 - The Google token is stored in your OS credential store. If none is available, it is
   written to a private file that only your user account can read.
 - Nothing is sent to the project author or any third party. There is no telemetry.
@@ -176,16 +208,33 @@ are queued for your sheet and the dashboard shows what was found.
   company source is registered, approved, and enabled.
 - **One app process at a time.** Running two copies against the same spreadsheet at once
   is not supported.
+- **Tracker dates are plain text.** Write `YYYY-MM-DD` or `DD/MM/YYYY` with the day
+  first; a trailing note such as `(pagi)` is ignored when dates are counted. The app
+  never rewrites what you typed.
+- **The spreadsheet time zone must be `Asia/Jakarta`** for the optional spreadsheet
+  `Dashboard` date windows. The app never changes it for you.
+- **The spreadsheet locale must be `en_US`, `id_ID`, or `in_ID`** for the optional
+  spreadsheet `Dashboard`. `in_ID` is the legacy Google identifier for the same
+  Indonesian locale as `id_ID`. Formulas use the locale's argument separator (comma or
+  semicolon), so other locales are refused rather than producing broken cells.
 
 ## Current status
 
-The core is usable today: target roles, company sources, manual searches with the daily
-limit and cooldown, a local job feed, Google Sheets sign-in and synchronization, and
-refreshing your local copy from the sheet.
+The app is usable today: target roles, company sources, manual searches with the daily
+limit and cooldown, an in-app dashboard, an opportunities feed with a detail view, an
+application tracker, Google Sheets sign-in and synchronization, and an optional
+formula-only `Dashboard` tab in your spreadsheet.
 
-Still in progress: automatic search history in the sheet, a dedicated job browsing
-screen, editing application-tracking fields from the app, and manual LinkedIn post
-import. Until those land, your spreadsheet remains the place to track applications.
+Google Sheets support is implemented and covered by mocked tests, plus an opt-in live
+suite that runs a real round-trip against a disposable scratch spreadsheet. The default
+`uv run pytest` never contacts Google; treat your first sync against your own sheet as a
+supervised setup step.
+
+Still in progress: automatic search history in the sheet (there is no `Run_History` tab
+yet) and manual LinkedIn post import. The spreadsheet `Dashboard` is a companion view
+only; the app dashboard remains the place for operational state such as search limits,
+sync status, and target-role names. You can edit application-tracking fields in the app
+or in the sheet; the sheet stays canonical.
 
 ## Reporting a security issue
 
