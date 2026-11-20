@@ -69,6 +69,7 @@ __pycache__/
 .ruff_cache/
 .coverage
 htmlcov/
+.local/
 
 # Node / frontend build
 node_modules/
