@@ -29,6 +29,7 @@ from personal_job_finder_api.integrations.google_sheets.config import (
     JOB_SOURCE_HEADERS,
     OPPORTUNITY_HEADERS,
     REQUIRED_TABS,
+    header_row_for,
 )
 from personal_job_finder_api.integrations.google_sheets.errors import GoogleSheetsError
 from personal_job_finder_api.main import create_app
@@ -48,6 +49,7 @@ def _row_window(address: str) -> tuple[int | None, int | None]:
     """Return the row bounds of an A1 address such as ``A5:A5``.
 
     Column-only ranges (``A:AG``) have no row bounds and return ``(None, None)``.
+    An open-ended range (``A5:AG``) starts at its first row and runs to the end.
     """
 
     start, _, end = address.partition(":")
@@ -56,18 +58,27 @@ def _row_window(address: str) -> tuple[int | None, int | None]:
         return None, None
     first = int(digits)
     end_digits = "".join(ch for ch in end if ch.isdigit())
-    last = int(end_digits) if end_digits else first
-    return first, last
+    if end_digits:
+        return first, int(end_digits)
+    if end:
+        return first, None
+    return first, first
 
 
 class FakeSheet:
-    """The subset of one spreadsheet the dispatcher reads and writes."""
+    """The subset of one spreadsheet the dispatcher reads and writes.
+
+    Rows are stored from the canonical header down, so ``rows(tab)[0]`` is the
+    header. ``first_rows`` records the header's absolute row, and the transport
+    translates between that and the compact view.
+    """
 
     def __init__(self) -> None:
         self.tabs: dict[str, list[list[str]]] = {
             "Opportunities": [list(OPPORTUNITY_HEADERS)],
             "Job_Sources": [list(JOB_SOURCE_HEADERS)],
         }
+        self.first_rows: dict[str, int] = {tab: header_row_for(tab) for tab in self.tabs}
         self.calls: list[tuple[str, Any]] = []
 
 
@@ -92,6 +103,7 @@ class FakeTransport:
         for requested in ranges:
             tab, address = str(requested).split("!", 1)
             rows = self.sheet.tabs.get(tab, [])
+            offset = self.sheet.first_rows.get(tab, 1) - 1
             first, last = _row_window(address)
             if first is None:
                 # Whole-column range: return every row of the tab.
@@ -99,7 +111,12 @@ class FakeTransport:
                 continue
             # Narrow range (the pre-write revalidation read): like the real API,
             # return only the requested rows; past-the-end rows come back empty.
-            selected = rows[first - 1 : last] if first <= len(rows) else []
+            stored_first = first - offset
+            if stored_first < 1 or stored_first > len(rows):
+                value_ranges.append({})
+                continue
+            stop = len(rows) if last is None else last - offset
+            selected = rows[stored_first - 1 : stop]
             value_ranges.append({"values": [list(row) for row in selected]} if selected else {})
         return {"valueRanges": value_ranges}
 
@@ -118,10 +135,12 @@ class FakeTransport:
             range_name = str(item["range"])
             tab = range_name.split("!", 1)[0]
             address = range_name.split("!", 1)[1]
-            start_row = int("".join(ch for ch in address.split(":", 1)[0] if ch.isdigit()))
+            absolute_row = int("".join(ch for ch in address.split(":", 1)[0] if ch.isdigit()))
+            offset = self.sheet.first_rows.get(tab, 1) - 1
+            start_row = absolute_row - offset
             rows = self.sheet.tabs[tab]
-            for offset, values in enumerate(item["values"]):
-                row_number = start_row + offset
+            for row_index, values in enumerate(item["values"]):
+                row_number = start_row + row_index
                 while len(rows) < row_number:
                     rows.append([""] * len(rows[0]))
                 rows[row_number - 1] = [str(value) for value in values]

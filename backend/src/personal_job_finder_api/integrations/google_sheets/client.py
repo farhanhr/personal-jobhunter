@@ -102,11 +102,15 @@ class SheetProperties:
     #: Native table ids on this sheet. Empty when the sheet has no table, which is
     #: also what a minimal provider response or a test fake reports.
     table_ids: tuple[str, ...] = ()
+    #: The 0-based ``endRowIndex`` of each table. Repair compares it with the grid
+    #: so a grid that grew after the table was created gets a wider table.
+    table_end_rows: tuple[int, ...] = ()
     #: Frozen pane counts. Repair compares these so a healthy sheet is left alone.
     frozen_row_count: int = 0
     frozen_column_count: int = 0
-    #: Total rows in the grid. A native table cannot exceed it.
+    #: Total rows and columns in the grid. A native table cannot exceed them.
     row_count: int = 0
+    column_count: int = 0
 
 
 @dataclass(frozen=True, slots=True)
@@ -244,8 +248,12 @@ class GoogleSheetsClient:
             row_count = grid_properties.get("rowCount") or 0
             if isinstance(row_count, bool) or not isinstance(row_count, int):
                 raise _malformed_response()
+            column_count = grid_properties.get("columnCount") or 0
+            if isinstance(column_count, bool) or not isinstance(column_count, int):
+                raise _malformed_response()
 
             table_ids: list[str] = []
+            table_end_rows: list[int] = []
             raw_tables = sheet.get("tables")
             if raw_tables is not None:
                 if not isinstance(raw_tables, list):
@@ -259,14 +267,20 @@ class GoogleSheetsClient:
                     if not isinstance(table_id, str):
                         raise _malformed_response()
                     table_ids.append(table_id)
+                    raw_range = table.get("range")
+                    end_row = raw_range.get("endRowIndex") if isinstance(raw_range, dict) else None
+                    if isinstance(end_row, int) and not isinstance(end_row, bool):
+                        table_end_rows.append(end_row)
             parsed.append(
                 SheetProperties(
                     title=title,
                     sheet_id=sheet_id,
                     table_ids=tuple(table_ids),
+                    table_end_rows=tuple(table_end_rows),
                     frozen_row_count=frozen_row_count,
                     frozen_column_count=frozen_column_count,
                     row_count=row_count,
+                    column_count=column_count,
                 )
             )
 
@@ -281,8 +295,15 @@ class GoogleSheetsClient:
         self,
         spreadsheet_id: str,
         tabs: Sequence[str],
+        *,
+        header_rows: Mapping[str, int] | None = None,
     ) -> dict[str, tuple[str, ...]]:
-        """Read the first row of every requested tab in one bounded batch."""
+        """Read the header row of every requested tab in one bounded batch.
+
+        ``header_rows`` maps a tab to its 1-based header row. A tab absent from
+        the mapping keeps the row-1 default, which is correct for
+        ``Job_Sources`` and for callers that only know the legacy layout.
+        """
 
         if not tabs:
             return {}
@@ -291,7 +312,8 @@ class GoogleSheetsClient:
                 "batch_too_large",
                 "The Google Sheets read batch exceeds the configured limit.",
             )
-        ranges = [f"{tab}!1:1" for tab in tabs]
+        rows = header_rows or {}
+        ranges = [f"{tab}!{rows.get(tab, 1)}:{rows.get(tab, 1)}" for tab in tabs]
         response = self._transport.batch_get_values(spreadsheet_id, ranges)
         value_ranges = response.get("valueRanges") if isinstance(response, dict) else None
         if not isinstance(value_ranges, list) or len(value_ranges) != len(tabs):
@@ -472,8 +494,17 @@ class GoogleSheetsClient:
         self,
         spreadsheet_id: str,
         headers: Mapping[str, Sequence[str]],
+        *,
+        header_rows: Mapping[str, int] | None = None,
     ) -> dict[str, Any]:
-        data = [{"range": f"{tab}!A1", "values": [list(values)]} for tab, values in headers.items()]
+        rows = header_rows or {}
+        data = [
+            {
+                "range": f"{tab}!A{rows.get(tab, 1)}",
+                "values": [list(values)],
+            }
+            for tab, values in headers.items()
+        ]
         if not data:
             return {}
         return self.batch_update_values(spreadsheet_id, data)

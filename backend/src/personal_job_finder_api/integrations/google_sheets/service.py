@@ -25,6 +25,9 @@ from personal_job_finder_api.integrations.google_sheets.dashboard import (
     MetricsInitResult,
     MetricsInitService,
 )
+from personal_job_finder_api.integrations.google_sheets.dashboard_cleanup import (
+    DashboardRemovalService,
+)
 from personal_job_finder_api.integrations.google_sheets.oauth import (
     GoogleSheetsCredentialsProvider,
     build_google_credentials_provider,
@@ -32,10 +35,6 @@ from personal_job_finder_api.integrations.google_sheets.oauth import (
 from personal_job_finder_api.integrations.google_sheets.preflight import (
     PreflightResult,
     SpreadsheetPreflightService,
-)
-from personal_job_finder_api.integrations.google_sheets.workspace import (
-    DashboardInitResult,
-    WorkspaceDashboardService,
 )
 from personal_job_finder_api.integrations.google_sheets.workspace_repair import (
     RepairOutcome,
@@ -58,15 +57,15 @@ class GoogleSheetsFoundation:
     def initialize(self) -> PreflightResult:
         return self.preflight.initialize(self.config.spreadsheet_id)
 
-    def initialize_dashboard(self) -> MetricsInitResult:
+    def initialize_dashboard(self, *, force: bool = False) -> MetricsInitResult:
         """Create and initialize the optional metric board (``Metrics``)."""
 
-        return MetricsInitService(self.client, self.config.spreadsheet_id).initialize()
+        return MetricsInitService(self.client, self.config.spreadsheet_id).initialize(force=force)
 
-    def initialize_workspace(self) -> DashboardInitResult:
-        """Create and initialize the optional summary cards (``Dashboard``)."""
+    def remove_dashboard(self) -> str:
+        """Delete the retired ``Dashboard`` cards tab when this project owns it."""
 
-        return WorkspaceDashboardService(self.client, self.config.spreadsheet_id).initialize()
+        return DashboardRemovalService(self.client, self.config.spreadsheet_id).remove()
 
     def repair_workspace(self, *, force: bool = False) -> RepairOutcome:
         """Repair workbook structure without touching user data."""

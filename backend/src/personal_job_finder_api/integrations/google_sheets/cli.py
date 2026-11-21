@@ -1,8 +1,9 @@
 """Local command-line setup for the Google Sheets foundation.
 
 Commands never print credentials, OAuth response bodies, or spreadsheet IDs.
-Only the explicitly typed ``init``, ``dashboard-init``, and ``sync`` commands
-write to the spreadsheet; ``check`` stays read-only.
+Only the explicitly typed ``init``, ``metrics-init``, ``dashboard-delete``,
+``workspace-repair``, and ``sync`` commands write to the spreadsheet; ``check``
+stays read-only.
 """
 
 from __future__ import annotations
@@ -183,7 +184,7 @@ def _build_parser() -> argparse.ArgumentParser:
             "auth",
             "check",
             "init",
-            "dashboard-init",
+            "dashboard-delete",
             "dashboard-verify",
             "metrics-init",
             "workspace-repair",
@@ -195,11 +196,12 @@ def _build_parser() -> argparse.ArgumentParser:
         help=(
             "auth: connect a Google account; check: read-only preflight; "
             "init: create missing canonical tabs and empty headers; "
-            "dashboard-init: create the optional summary-cards Dashboard tab; "
-            "metrics-init: create the optional formula-only Metrics board; "
-            "dashboard-verify: read-only check that every summary card and metric "
-            "agrees with the canonical rows; workspace-repair: reconcile headers, the "
-            "native table, and the frozen panes without changing data; "
+            "dashboard-delete: delete the retired summary-cards Dashboard tab when "
+            "this project owns it; "
+            "metrics-init: create or refresh the optional formula-only Metrics board; "
+            "dashboard-verify: read-only check that the KPI strip and every metric "
+            "agree with the canonical rows; workspace-repair: reconcile headers, the "
+            "native table, the KPI strip, and the frozen panes without changing data; "
             "disconnect: remove the stored Google credential; sync: dispatch due "
             "outbox work; recover: return abandoned in-progress work to the retry "
             "queue; requeue: re-enable one blocked projection after fixing its cause"
@@ -247,13 +249,12 @@ def main(argv: Sequence[str] | None = None) -> int:
             _print_preflight(result)
             return 0 if result.is_ready else 1
 
-        if arguments.command == "dashboard-init":
-            outcome = foundation.initialize_workspace()
-            print(outcome.message)
+        if arguments.command == "dashboard-delete":
+            print(foundation.remove_dashboard())
             return 0
 
         if arguments.command == "metrics-init":
-            outcome = foundation.initialize_dashboard()
+            outcome = foundation.initialize_dashboard(force=arguments.force)
             print(outcome.message)
             return 0
 

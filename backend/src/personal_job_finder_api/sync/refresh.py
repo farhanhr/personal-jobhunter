@@ -31,6 +31,7 @@ from personal_job_finder_api.integrations.google_sheets.config import (
     JOB_SOURCE_HEADERS,
     OPPORTUNITY_HEADERS,
     REQUIRED_TABS,
+    header_row_for,
 )
 from personal_job_finder_api.integrations.google_sheets.errors import GoogleSheetsError
 from personal_job_finder_api.integrations.google_sheets.preflight import (
@@ -198,20 +199,22 @@ class SheetsRefreshService:
                     f"The {tab} header row does not match the canonical contract.",
                 )
 
-        ranges = [
-            f"{tab}!A:{column_letter(len(headers))}" for tab, headers in REQUIRED_TABS.items()
+        targets = [
+            (tab, f"{tab}!A{header_row_for(tab)}:{column_letter(len(headers))}")
+            for tab, headers in REQUIRED_TABS.items()
         ]
+        ranges = [range_name for _, range_name in targets]
         values = client.get_values(spreadsheet_id, ranges)
 
         opportunities = _convert_tab(
             tab=OPPORTUNITY_TAB,
             headers=OPPORTUNITY_HEADERS,
-            raw_rows=values.get(ranges[0], []),
+            raw_rows=values.get(targets[0][1], []),
         )
         job_sources = _convert_tab(
             tab=JOB_SOURCE_TAB,
             headers=JOB_SOURCE_HEADERS,
-            raw_rows=values.get(ranges[1], []),
+            raw_rows=values.get(targets[1][1], []),
         )
 
         self._repository.replace_snapshot(
@@ -270,6 +273,9 @@ def _convert_tab(
             f"The {tab} header row does not match the canonical contract.",
         )
 
+    # ``raw_rows`` starts at the tab's canonical header row, so ``enumerate``
+    # reports positions relative to that header, which is what the error text
+    # names. Rows above the header (the KPI strip) were never read.
     converted: list[dict[str, str | None]] = []
     for position, raw_row in enumerate(raw_rows[1:], start=2):
         cells = list(raw_row[: len(headers)])

@@ -389,10 +389,10 @@ def header_only(*, as_of: date) -> ExpectedMetrics:
     return compute((), (), as_of=as_of)
 
 
-# ------------------------------------------------------------- workspace cards
+# ------------------------------------------------------------ workspace KPI strip
 
-#: Card cells in the order the cards are laid out.
-CARD_CELLS: tuple[str, ...] = ("B3", "B4", "B5", "B6", "B7", "B8")
+#: The four value cells of the KPI strip on ``Opportunities``.
+KPI_STRIP_CELLS: tuple[str, ...] = ("A2", "E2", "I2", "M2")
 
 ARCHIVED_USER_STATUS = "ignored"
 EXCLUDED_LOCATION_STATUS = "excluded"
@@ -412,14 +412,14 @@ def _is_archived(row: OpportunityRow) -> bool:
     )
 
 
-def compute_cards(
+def compute_kpi_strip(
     opportunities: Sequence[OpportunityRow],
     *,
     as_of: date,
 ) -> ExpectedMetrics:
-    """Compute the six ``Dashboard`` cards independently of the formulas.
+    """Compute the four ``Opportunities`` KPI values independently of the formulas.
 
-    This deliberately does not import the card builder: an expectation derived
+    This deliberately does not import the strip builder: an expectation derived
     from the formula under test would agree with its bugs.
     """
 
@@ -445,16 +445,16 @@ def compute_cards(
         parsed, _ = _tracker_date(row.interview_date)
         return parsed is not None and interview_start <= parsed <= interview_end
 
-    def offers(row: OpportunityRow) -> bool:
-        return _is_active(row) and normalize_status(row.application_status) == "offer"
+    def total_applied(row: OpportunityRow) -> bool:
+        if not _is_active(row):
+            return False
+        status = normalize_status(row.application_status)
+        return status != "" and status != "need to apply"
 
     values: dict[str, int | str] = {
-        "B2": as_of.isoformat(),
-        "B3": _distinct_ids((row.opportunity_id, need_to_apply(row)) for row in opportunities),
-        "B4": _distinct_ids((row.opportunity_id, applied(row)) for row in opportunities),
-        "B5": _distinct_ids((row.opportunity_id, interviewing(row)) for row in opportunities),
-        "B6": _distinct_ids((row.opportunity_id, offers(row)) for row in opportunities),
-        "B7": _distinct_ids((row.opportunity_id, _is_active(row)) for row in opportunities),
-        "B8": _distinct_ids((row.opportunity_id, _is_archived(row)) for row in opportunities),
+        "A2": _distinct_ids((row.opportunity_id, total_applied(row)) for row in opportunities),
+        "E2": _distinct_ids((row.opportunity_id, need_to_apply(row)) for row in opportunities),
+        "I2": _distinct_ids((row.opportunity_id, applied(row)) for row in opportunities),
+        "M2": _distinct_ids((row.opportunity_id, interviewing(row)) for row in opportunities),
     }
     return ExpectedMetrics(values=values)

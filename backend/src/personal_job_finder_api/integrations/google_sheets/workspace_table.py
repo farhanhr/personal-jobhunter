@@ -23,6 +23,7 @@ from dataclasses import dataclass
 from typing import Final
 
 from personal_job_finder_api.integrations.google_sheets.config import (
+    OPPORTUNITY_HEADER_ROW,
     OPPORTUNITY_HEADERS,
 )
 
@@ -30,19 +31,21 @@ OPPORTUNITY_TAB: Final = "Opportunities"
 
 TABLE_NAME: Final = "OpportunitiesTable"
 
-#: The table rectangle starts at row 1 so the header is inside it. The row count is
-#: generous: Sheets grows the range as rows are appended, and a table that stopped
-#: at the current last row would silently exclude the next discovery.
+#: The table rectangle starts at the canonical header row, below the KPI strip.
+#: The row count is generous: Sheets grows the range as rows are appended, and a
+#: table that stopped at the current last row would silently exclude the next
+#: discovery.
 TABLE_ROWS: Final = 5_000
 
 #: Columns the user owns, with the vocabulary a dropdown offers. A column absent
 #: from this mapping is plain text.
 #:
-#: The table's ``DROPDOWN`` column type supplies both the picker and its list, and
-#: Sheets accepts any other value in such a cell: live verification stored the
-#: free text ``Ghosted`` in ``application_status`` unchanged. A separate
-#: ``setDataValidation`` request is therefore both unnecessary and rejected —
-#: "This operation is not allowed on cells in typed columns."
+#: These must be the table's ``DROPDOWN`` column type. Google rejects
+#: ``setDataValidation`` on **any** sheet that carries a native table — verified
+#: live: "This operation is not allowed on cells in typed columns", even on a
+#: ``TEXT`` column and even on a row outside the table. The picker therefore comes
+#: from the table column, and the table must span every grid row so the picker is
+#: available on every data row (ADR-027).
 USER_DROPDOWNS: Final = {
     "user_status": ("new", "saved", "ignored"),
     "application_status": (
@@ -64,16 +67,21 @@ USER_DROPDOWNS: Final = {
 #: text (P0/12, AGENTS.md "never rewrite what you typed"), so these stay TEXT.
 TEXT_DATE_COLUMNS: Final = ("date_applied", "follow_up_date", "interview_date")
 
-#: Frozen so the identity stays visible while scrolling a wide table.
-FROZEN_ROWS: Final = 1
+#: Freeze the KPI strip, the spacer, and the header, plus the identity columns.
+FROZEN_ROWS: Final = OPPORTUNITY_HEADER_ROW
 FROZEN_COLUMNS: Final = 3
+
+#: The 0-based index of the hidden helper column (``AH``), just right of the
+#: canonical ``AG``. The KPI strip keeps its row bound and its sentinel there.
+HELPER_COLUMN_INDEX: Final = len(OPPORTUNITY_HEADERS)
 
 
 def column_type(name: str) -> str:
     """The Sheets column type for one canonical column.
 
-    Only the user-owned pickers are typed. Everything else stays TEXT so Sheets
-    never coerces an id, a timestamp, or a tracker date into a number.
+    Only the two user-owned pickers are typed, because a sheet with a native table
+    has no other validation surface. Everything else stays TEXT so Sheets never
+    coerces an id, a timestamp, or a tracker date into a number.
     """
 
     if name in USER_DROPDOWNS:
@@ -91,6 +99,14 @@ def column_index_of(name: str) -> int:
 
 
 def _dropdown_rule(values: tuple[str, ...]) -> dict[str, object]:
+    """The table column's picker.
+
+    A table column's rule accepts only ``condition``. ``strict`` and
+    ``showCustomUi`` belong to cell validation and are rejected here, and a
+    ``DROPDOWN`` table column already accepts free text: live verification stored
+    ``Ghosted`` unchanged.
+    """
+
     return {
         "condition": {
             "type": "ONE_OF_LIST",
@@ -99,15 +115,29 @@ def _dropdown_rule(values: tuple[str, ...]) -> dict[str, object]:
     }
 
 
-def build_table(sheet_id: int, rows: int | None = None) -> dict[str, object]:
-    """The native Table definition, including its dropdown columns.
+def table_bounds(rows: int | None = None) -> tuple[int, int]:
+    """The native table's 0-based ``[start, end)`` rows on the sheet grid.
 
     ``rows`` is the sheet's real row count when known: a table cannot extend past
     the grid, and the provider clamps an oversized range instead of failing, which
-    would leave the definition and the sheet disagreeing.
+    would leave the definition and the sheet disagreeing. The table always reaches
+    the last grid row, so a row the grid grew later still shows the picker.
     """
 
-    row_count = TABLE_ROWS if rows is None else min(TABLE_ROWS, max(rows, 2))
+    start = OPPORTUNITY_HEADER_ROW - 1
+    end = start + TABLE_ROWS if rows is None else max(rows, start + 2)
+    return start, min(end, start + TABLE_ROWS)
+
+
+def build_table(sheet_id: int, rows: int | None = None) -> dict[str, object]:
+    """The native Table definition.
+
+    The table starts at the canonical header row and spans the whole grid, because
+    the dropdown picker only exists inside a table. Its columns are TEXT except
+    the two user-owned pickers, which are ``DROPDOWN``.
+    """
+
+    start, end = table_bounds(rows)
 
     properties: list[dict[str, object]] = []
     for index, name in enumerate(OPPORTUNITY_HEADERS):
@@ -124,8 +154,8 @@ def build_table(sheet_id: int, rows: int | None = None) -> dict[str, object]:
         "name": TABLE_NAME,
         "range": {
             "sheetId": sheet_id,
-            "startRowIndex": 0,
-            "endRowIndex": row_count,
+            "startRowIndex": start,
+            "endRowIndex": end,
             "startColumnIndex": 0,
             "endColumnIndex": len(OPPORTUNITY_HEADERS),
         },
@@ -135,6 +165,42 @@ def build_table(sheet_id: int, rows: int | None = None) -> dict[str, object]:
             "secondBandColorStyle": {"rgbColor": {"red": 0.96, "green": 0.97, "blue": 0.98}},
         },
         "columnProperties": properties,
+    }
+
+
+def build_helper_column_request(
+    sheet_id: int,
+    column_count: int,
+) -> dict[str, object] | None:
+    """Append and hide one column for the KPI strip's helper and sentinel.
+
+    The canonical grid ends at the last header column, so the helper needs a
+    column of its own. Hiding it keeps the workbook visually unchanged.
+    """
+
+    if column_count > HELPER_COLUMN_INDEX:
+        return None
+    return {
+        "appendDimension": {
+            "sheetId": sheet_id,
+            "dimension": "COLUMNS",
+            "length": HELPER_COLUMN_INDEX + 1 - column_count,
+        }
+    }
+
+
+def build_hide_helper_request(sheet_id: int) -> dict[str, object]:
+    return {
+        "updateDimensionProperties": {
+            "range": {
+                "sheetId": sheet_id,
+                "dimension": "COLUMNS",
+                "startIndex": HELPER_COLUMN_INDEX,
+                "endIndex": HELPER_COLUMN_INDEX + 1,
+            },
+            "properties": {"hiddenByUser": True},
+            "fields": "hiddenByUser",
+        }
     }
 
 
@@ -209,6 +275,7 @@ def state_from_metadata(raw: Mapping[str, object]) -> TableState:
 __all__ = [
     "FROZEN_COLUMNS",
     "FROZEN_ROWS",
+    "HELPER_COLUMN_INDEX",
     "OPPORTUNITY_TAB",
     "TABLE_NAME",
     "TABLE_ROWS",
@@ -217,9 +284,12 @@ __all__ = [
     "USER_DROPDOWNS",
     "build_add_table_request",
     "build_freeze_request",
+    "build_helper_column_request",
+    "build_hide_helper_request",
     "build_table",
     "build_update_table_request",
     "column_index_of",
     "column_type",
     "state_from_metadata",
+    "table_bounds",
 ]

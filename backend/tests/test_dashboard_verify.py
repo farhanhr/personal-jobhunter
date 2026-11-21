@@ -1,4 +1,4 @@
-"""Tests for the read-only Dashboard verification.
+"""Tests for the read-only dashboard verification.
 
 These tests use a fake client, so they prove the *diagnosis logic*: a written
 formula that returns an error, a metric written as a constant, and a metric whose
@@ -13,7 +13,6 @@ from typing import Any
 
 from personal_job_finder_api.integrations.google_sheets import dashboard_layout as layout
 from personal_job_finder_api.integrations.google_sheets import dashboard_verify as verify
-from personal_job_finder_api.integrations.google_sheets import workspace_layout as cards_layout
 from personal_job_finder_api.integrations.google_sheets.client import (
     GridCell,
     SheetProperties,
@@ -48,36 +47,30 @@ class FakeClient:
         opportunities: list[list[str]] | None = None,
         sources: list[list[str]] | None = None,
         cells: dict[str, GridCell] | None = None,
+        strip: dict[str, GridCell] | None = None,
         sentinel: str = layout.METRICS_SENTINEL,
         time_zone: str | None = "Asia/Jakarta",
         locale: str | None = "in_ID",
         tabs: tuple[str, ...] = ("Opportunities", "Job_Sources", layout.METRICS_TAB, "Sheet1"),
-        cards: bool = False,
-        cards_sentinel: str = cards_layout.DASHBOARD_SENTINEL,
     ) -> None:
         self._opportunities = opportunities or [list(OPPORTUNITY_HEADERS)]
         self._sources = sources or [list(JOB_SOURCE_HEADERS)]
         self._cells = cells or {}
+        self._strip = strip or {
+            address: GridCell(address=address, formula="=0", value="0") for address in CARD_CELLS
+        }
         self._sentinel = sentinel
         self._time_zone = time_zone
         self._locale = locale
         self._tabs = tabs
-        self._cards_enabled = cards
-        self._cards_sentinel = cards_sentinel
-        self._cards = {
-            address: GridCell(address=address, formula="=0", value="0") for address in CARD_CELLS
-        }
         self.grid_ranges: list[str] = []
 
     def get_metadata(self, spreadsheet_id: str) -> SpreadsheetMetadata:
-        titles = self._tabs
-        if self._cards_enabled and cards_layout.DASHBOARD_TAB not in titles:
-            titles = (*titles, cards_layout.DASHBOARD_TAB)
         return SpreadsheetMetadata(
-            titles=titles,
+            titles=self._tabs,
             time_zone=self._time_zone,
             locale=self._locale,
-            sheets=tuple(SheetProperties(title=title) for title in titles),
+            sheets=tuple(SheetProperties(title=title) for title in self._tabs),
         )
 
     def get_values(
@@ -105,11 +98,8 @@ class FakeClient:
         self.grid_ranges = list(ranges)
         result: dict[str, list[list[GridCell]]] = {}
         for requested in ranges:
-            if requested.startswith(cards_layout.DASHBOARD_TAB):
-                cells = dict(self._cards)
-                cells[cards_layout.SENTINEL_CELL] = GridCell(
-                    address=cards_layout.SENTINEL_CELL, literal=self._cards_sentinel
-                )
+            if requested.startswith("Opportunities"):
+                cells = dict(self._strip)
             else:
                 cells = dict(self._cells)
                 cells[layout.SENTINEL_CELL] = GridCell(
@@ -138,7 +128,9 @@ def test_a_correctly_calculated_dashboard_passes() -> None:
     report = _verify(FakeClient(cells=_all_zero_cells()))
 
     assert report.ok, report.failures
-    assert report.summary().startswith(f"{len(verify.METRIC_CELLS)}/{len(verify.METRIC_CELLS)}")
+    metric_checks = [check for check in report.checks if check.tab == layout.METRICS_TAB]
+    total = len(metric_checks) + len(CARD_CELLS)
+    assert report.summary().startswith(f"{total}/{total}")
     assert report.problems == ()
 
 
@@ -153,8 +145,8 @@ def test_every_metric_is_read_in_one_bounding_range() -> None:
 
     _verify(client)
 
-    # The sentinel sits in column M, so the rectangle reaches it in the same read.
-    assert client.grid_ranges == [f"{layout.METRICS_TAB}!A1:M34"]
+    # The strip read comes first; the metric board is still one rectangle.
+    assert f"{layout.METRICS_TAB}!A1:M34" in client.grid_ranges
 
 
 def test_a_formula_error_is_reported_as_a_failure_not_a_write_success() -> None:
@@ -216,7 +208,8 @@ def test_the_oracle_expected_value_is_used_for_comparison() -> None:
 
     report = _verify(FakeClient(opportunities=opportunities, cells=cells))
 
-    assert report.ok, report.failures
+    metric_checks = [check for check in report.checks if check.tab == layout.METRICS_TAB]
+    assert all(check.ok for check in metric_checks), metric_checks
 
 
 def test_numbers_are_compared_numerically_not_as_text() -> None:
@@ -228,11 +221,10 @@ def test_numbers_are_compared_numerically_not_as_text() -> None:
     assert report.ok, report.failures
 
 
-def test_a_missing_dashboard_tab_is_a_problem_not_a_crash() -> None:
+def test_a_missing_metrics_tab_is_a_problem_not_a_crash() -> None:
     report = _verify(FakeClient(tabs=("Opportunities", "Job_Sources")))
 
-    assert report.checks == ()
-    assert any("Neither the Dashboard" in problem for problem in report.problems)
+    assert any("Metrics board does not exist" in problem for problem in report.problems)
     assert not report.ok
 
 
@@ -269,39 +261,46 @@ def test_the_verify_module_never_writes() -> None:
     assert not hasattr(client, "batch_update")
 
 
-# --------------------------------------------------------------- cards tab
+# ------------------------------------------------------------------ KPI strip
 
 
-def test_the_cards_tab_is_verified_against_the_card_oracle() -> None:
-    cells = _all_zero_cells()
-    client = FakeClient(cells=cells, cards=True)
+def test_the_strip_is_verified_against_its_own_oracle() -> None:
+    client = FakeClient(cells=_all_zero_cells())
 
     report = _verify(client)
 
-    card_checks = [check for check in report.checks if check.tab == cards_layout.DASHBOARD_TAB]
-    assert len(card_checks) == len(CARD_CELLS)
-    assert {check.address for check in card_checks} == set(CARD_CELLS)
+    strip_checks = [check for check in report.checks if check.tab == "Opportunities"]
+    assert len(strip_checks) == len(CARD_CELLS)
+    assert {check.address for check in strip_checks} == set(CARD_CELLS)
     assert report.ok, report.failures
 
 
 def test_a_card_that_disagrees_is_reported() -> None:
-    cells = _all_zero_cells()
-    client = FakeClient(cells=cells, cards=True)
-    client._cards["B7"] = GridCell(address="B7", formula="=99", value="99")
+    strip = {address: GridCell(address=address, formula="=0", value="0") for address in CARD_CELLS}
+    strip["E2"] = GridCell(address="E2", formula="=99", value="99")
 
-    report = _verify(client)
+    report = _verify(FakeClient(cells=_all_zero_cells(), strip=strip))
 
-    failing = {
-        check.address: check for check in report.failures if check.tab == cards_layout.DASHBOARD_TAB
-    }
-    assert failing["B7"].expected == 0
-    assert failing["B7"].actual == "99"
+    failing = {check.address: check for check in report.failures if check.tab == "Opportunities"}
+    assert failing["E2"].expected == 0
+    assert failing["E2"].actual == "99"
 
 
-def test_a_cards_tab_without_a_sentinel_is_reported() -> None:
-    client = FakeClient(cells=_all_zero_cells(), cards=True, cards_sentinel="")
+def test_a_card_written_as_a_constant_is_reported() -> None:
+    strip = {address: GridCell(address=address, formula="=0", value="0") for address in CARD_CELLS}
+    strip["A2"] = GridCell(address="A2", literal="0", value="0")
 
-    report = _verify(client)
+    report = _verify(FakeClient(cells=_all_zero_cells(), strip=strip))
 
-    assert any("cards sentinel" in problem for problem in report.problems)
-    assert not report.ok
+    failing = {check.address: check for check in report.failures if check.tab == "Opportunities"}
+    assert failing["A2"].status == "not_a_formula"
+
+
+def test_a_card_that_errors_is_reported() -> None:
+    strip = {address: GridCell(address=address, formula="=0", value="0") for address in CARD_CELLS}
+    strip["M2"] = GridCell(address="M2", formula="=IF(", value=None, error="ERROR")
+
+    report = _verify(FakeClient(cells=_all_zero_cells(), strip=strip))
+
+    failing = {check.address: check for check in report.failures if check.tab == "Opportunities"}
+    assert failing["M2"].status == "error"

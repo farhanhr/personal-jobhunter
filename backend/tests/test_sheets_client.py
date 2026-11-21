@@ -112,6 +112,50 @@ def test_header_rows_are_read_in_one_batch_and_trimmed() -> None:
     ]
 
 
+def test_header_rows_follow_a_configured_header_row() -> None:
+    transport = FakeTransport(
+        value_ranges=[{"values": [["opportunity_id"]]}, {"values": [["source_id"]]}]
+    )
+
+    headers = GoogleSheetsClient(transport).get_header_rows(
+        "spreadsheet",
+        ["Opportunities", "Job_Sources"],
+        header_rows={"Opportunities": 5, "Job_Sources": 1},
+    )
+
+    assert headers == {"Opportunities": ("opportunity_id",), "Job_Sources": ("source_id",)}
+    assert transport.calls == [
+        (
+            "batch_get_values",
+            ("spreadsheet", ("Opportunities!5:5", "Job_Sources!1:1")),
+        )
+    ]
+
+
+def test_write_headers_follow_a_configured_header_row() -> None:
+    transport = FakeTransport()
+
+    GoogleSheetsClient(transport).write_headers(
+        "spreadsheet",
+        {"Opportunities": ("opportunity_id",), "Job_Sources": ("source_id",)},
+        header_rows={"Opportunities": 5, "Job_Sources": 1},
+    )
+
+    assert transport.calls == [
+        (
+            "batch_update_values",
+            (
+                "spreadsheet",
+                [
+                    {"range": "Opportunities!A5", "values": [["opportunity_id"]]},
+                    {"range": "Job_Sources!A1", "values": [["source_id"]]},
+                ],
+                "RAW",
+            ),
+        )
+    ]
+
+
 def test_missing_header_row_is_an_empty_tuple() -> None:
     transport = FakeTransport(value_ranges=[{}, {"values": []}])
 

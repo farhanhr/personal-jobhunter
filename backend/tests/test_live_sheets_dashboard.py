@@ -37,6 +37,9 @@ import pytest
 from personal_job_finder_api.core.config import Settings
 from personal_job_finder_api.integrations.google_sheets import dashboard_verify as verify
 from personal_job_finder_api.integrations.google_sheets import live_check
+from personal_job_finder_api.integrations.google_sheets.config import (
+    OPPORTUNITY_FIRST_DATA_ROW,
+)
 from personal_job_finder_api.integrations.google_sheets.service import (
     build_google_sheets_foundation,
 )
@@ -90,6 +93,11 @@ def test_the_dashboard_agrees_with_the_oracle_for_a_disposable_fixture() -> None
     allow_data = os.environ.get("PJF_LIVE_SHEETS_ALLOW_DATA") == "1"
     live_check.assert_disposable(snapshot, allow_data=allow_data)
 
+    # The KPI strip and the native table are part of what is verified, so apply
+    # the same repair `sync` applies before writing the fixture. The restore below
+    # restores values only; the presentation layer is intentionally kept.
+    foundation.repair_workspace()
+
     fixture = live_check.build_fixture(as_of=as_of, run_id=snapshot.run_id)
     expected = live_check.expected_metrics(fixture, as_of=as_of)
 
@@ -99,7 +107,7 @@ def test_the_dashboard_agrees_with_the_oracle_for_a_disposable_fixture() -> None
             spreadsheet_id,
             "Opportunities",
             fixture.opportunity_rows(),
-            start_row=2,
+            start_row=OPPORTUNITY_FIRST_DATA_ROW,
         )
         live_check.write_rows(
             client,
@@ -163,6 +171,9 @@ def test_every_scenario_agrees_with_the_oracle() -> None:
     print(f"snapshot: {artifact}")
 
     live_check.assert_disposable(snapshot, allow_data=True)
+    # Verify against the repaired layout, so the KPI strip is present and its
+    # cells are compared rather than reported as missing.
+    foundation.repair_workspace()
     scenarios = live_check.build_scenarios(as_of=as_of, run_id=snapshot.run_id)
     fail_fast = os.environ.get("PJF_LIVE_SHEETS_FAIL_FAST") == "1"
     # The Sheets API allows about 60 reads and 60 writes per minute. Pacing keeps

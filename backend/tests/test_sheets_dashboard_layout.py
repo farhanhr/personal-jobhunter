@@ -146,7 +146,7 @@ def test_as_of_formula_uses_numeric_format_codes_only() -> None:
 def test_last_row_helper_finds_the_last_non_blank_key_not_a_count() -> None:
     cells = _cells()
     assert cells["H1"] == (
-        '=IFERROR(MAX(2,MAX(FILTER(ROW(Opportunities!$A:$A),Opportunities!$A:$A<>""))),2)'
+        '=IFERROR(MAX(6,MAX(FILTER(ROW(Opportunities!$A$6:$A),Opportunities!$A$6:$A<>""))),6)'
     )
     assert cells["I1"] == (
         '=IFERROR(MAX(2,MAX(FILTER(ROW(Job_Sources!$A:$A),Job_Sources!$A:$A<>""))),2)'
@@ -177,37 +177,37 @@ def test_new_opportunity_window_boundaries_convert_jakarta_midnight_to_utc() -> 
 def test_total_formula_counts_distinct_non_excluded_opportunities() -> None:
     assert _cells()["B6"] == (
         "=IF(SUMPRODUCT("
-        '--(Opportunities!$A$2:INDEX(Opportunities!$A:$A,$H$1)<>""),'
-        '--(Opportunities!$L$2:INDEX(Opportunities!$L:$L,$H$1)<>"excluded"))=0,0,'
+        '--(Opportunities!$A$6:INDEX(Opportunities!$A:$A,$H$1)<>""),'
+        '--(Opportunities!$L$6:INDEX(Opportunities!$L:$L,$H$1)<>"excluded"))=0,0,'
         "COUNTUNIQUE(FILTER("
-        "Opportunities!$A$2:INDEX(Opportunities!$A:$A,$H$1),"
-        'Opportunities!$A$2:INDEX(Opportunities!$A:$A,$H$1)<>"",'
-        'Opportunities!$L$2:INDEX(Opportunities!$L:$L,$H$1)<>"excluded")))'
+        "Opportunities!$A$6:INDEX(Opportunities!$A:$A,$H$1),"
+        'Opportunities!$A$6:INDEX(Opportunities!$A:$A,$H$1)<>"",'
+        'Opportunities!$L$6:INDEX(Opportunities!$L:$L,$H$1)<>"excluded")))'
     )
 
 
 def test_excluded_formula_counts_distinct_excluded_opportunities() -> None:
     assert _cells()["B7"] == (
         "=IF(SUMPRODUCT("
-        '--(Opportunities!$A$2:INDEX(Opportunities!$A:$A,$H$1)<>""),'
-        '--(Opportunities!$L$2:INDEX(Opportunities!$L:$L,$H$1)="excluded"))=0,0,'
+        '--(Opportunities!$A$6:INDEX(Opportunities!$A:$A,$H$1)<>""),'
+        '--(Opportunities!$L$6:INDEX(Opportunities!$L:$L,$H$1)="excluded"))=0,0,'
         "COUNTUNIQUE(FILTER("
-        "Opportunities!$A$2:INDEX(Opportunities!$A:$A,$H$1),"
-        'Opportunities!$A$2:INDEX(Opportunities!$A:$A,$H$1)<>"",'
-        'Opportunities!$L$2:INDEX(Opportunities!$L:$L,$H$1)="excluded")))'
+        "Opportunities!$A$6:INDEX(Opportunities!$A:$A,$H$1),"
+        'Opportunities!$A$6:INDEX(Opportunities!$A:$A,$H$1)<>"",'
+        'Opportunities!$L$6:INDEX(Opportunities!$L:$L,$H$1)="excluded")))'
     )
 
 
 def test_applied_status_formula_is_case_and_space_insensitive() -> None:
     assert _cells()["B14"] == (
         "=IF(SUMPRODUCT("
-        '--(Opportunities!$A$2:INDEX(Opportunities!$A:$A,$H$1)<>""),'
-        "--(MAP(Opportunities!$AC$2:INDEX(Opportunities!$AC:$AC,$H$1),"
+        '--(Opportunities!$A$6:INDEX(Opportunities!$A:$A,$H$1)<>""),'
+        "--(MAP(Opportunities!$AC$6:INDEX(Opportunities!$AC:$AC,$H$1),"
         'LAMBDA(v,LOWER(TRIM(TO_TEXT(v)))="applied"))))=0,0,'
         "COUNTUNIQUE(FILTER("
-        "Opportunities!$A$2:INDEX(Opportunities!$A:$A,$H$1),"
-        'Opportunities!$A$2:INDEX(Opportunities!$A:$A,$H$1)<>"",'
-        "MAP(Opportunities!$AC$2:INDEX(Opportunities!$AC:$AC,$H$1),"
+        "Opportunities!$A$6:INDEX(Opportunities!$A:$A,$H$1),"
+        'Opportunities!$A$6:INDEX(Opportunities!$A:$A,$H$1)<>"",'
+        "MAP(Opportunities!$AC$6:INDEX(Opportunities!$AC:$AC,$H$1),"
         'LAMBDA(v,LOWER(TRIM(TO_TEXT(v)))="applied")))))'
     )
 
@@ -215,13 +215,13 @@ def test_applied_status_formula_is_case_and_space_insensitive() -> None:
 def test_blank_status_counts_rows_whose_status_is_not_recorded() -> None:
     assert _cells()["B21"] == (
         "=IF(SUMPRODUCT("
-        '--(Opportunities!$A$2:INDEX(Opportunities!$A:$A,$H$1)<>""),'
-        "--(MAP(Opportunities!$AC$2:INDEX(Opportunities!$AC:$AC,$H$1),"
+        '--(Opportunities!$A$6:INDEX(Opportunities!$A:$A,$H$1)<>""),'
+        "--(MAP(Opportunities!$AC$6:INDEX(Opportunities!$AC:$AC,$H$1),"
         'LAMBDA(v,TRIM(TO_TEXT(v))=""))))=0,0,'
         "COUNTUNIQUE(FILTER("
-        "Opportunities!$A$2:INDEX(Opportunities!$A:$A,$H$1),"
-        'Opportunities!$A$2:INDEX(Opportunities!$A:$A,$H$1)<>"",'
-        "MAP(Opportunities!$AC$2:INDEX(Opportunities!$AC:$AC,$H$1),"
+        "Opportunities!$A$6:INDEX(Opportunities!$A:$A,$H$1),"
+        'Opportunities!$A$6:INDEX(Opportunities!$A:$A,$H$1)<>"",'
+        "MAP(Opportunities!$AC$6:INDEX(Opportunities!$AC:$AC,$H$1),"
         'LAMBDA(v,TRIM(TO_TEXT(v))="")))))'
     )
 
@@ -230,13 +230,13 @@ def test_other_status_is_the_remainder_of_recorded_statuses() -> None:
     assert _cells()["B22"] == "=MAX(0,$J$1-SUM($B$13:$B$20))"
     assert _cells()["J1"] == (
         "=IF(SUMPRODUCT("
-        '--(Opportunities!$A$2:INDEX(Opportunities!$A:$A,$H$1)<>""),'
-        "--(MAP(Opportunities!$AC$2:INDEX(Opportunities!$AC:$AC,$H$1),"
+        '--(Opportunities!$A$6:INDEX(Opportunities!$A:$A,$H$1)<>""),'
+        "--(MAP(Opportunities!$AC$6:INDEX(Opportunities!$AC:$AC,$H$1),"
         'LAMBDA(v,TRIM(TO_TEXT(v))<>""))))=0,0,'
         "COUNTUNIQUE(FILTER("
-        "Opportunities!$A$2:INDEX(Opportunities!$A:$A,$H$1),"
-        'Opportunities!$A$2:INDEX(Opportunities!$A:$A,$H$1)<>"",'
-        "MAP(Opportunities!$AC$2:INDEX(Opportunities!$AC:$AC,$H$1),"
+        "Opportunities!$A$6:INDEX(Opportunities!$A:$A,$H$1),"
+        'Opportunities!$A$6:INDEX(Opportunities!$A:$A,$H$1)<>"",'
+        "MAP(Opportunities!$AC$6:INDEX(Opportunities!$AC:$AC,$H$1),"
         'LAMBDA(v,TRIM(TO_TEXT(v))<>"")))))'
     )
 
@@ -259,7 +259,7 @@ def test_unknown_source_counts_orphans_and_blank_source_types_without_double_cou
     orphan_conditions, orphan_arguments = terms[0]
     blank_type_conditions, blank_type_arguments = terms[1]
 
-    assert orphan_arguments[0] == "Opportunities!$A$2:INDEX(Opportunities!$A:$A,$H$1)"
+    assert orphan_arguments[0] == "Opportunities!$A$6:INDEX(Opportunities!$A:$A,$H$1)"
     assert any("MATCH(id," in c for c in orphan_conditions)
     assert blank_type_arguments[0] == "Job_Sources!$B$2:INDEX(Job_Sources!$B:$B,$I$1)"
     assert any(c.endswith('=""') and "Job_Sources!$C" in c for c in blank_type_conditions)
@@ -273,18 +273,18 @@ def test_unknown_source_counts_orphans_and_blank_source_types_without_double_cou
 def test_new_opportunity_formula_requires_canonical_timestamp_and_window() -> None:
     formula = _cells()["B8"]
     assert "COUNTUNIQUE(FILTER(" in formula
-    assert 'Opportunities!$L$2:INDEX(Opportunities!$L:$L,$H$1)<>"excluded"' in formula
+    assert 'Opportunities!$L$6:INDEX(Opportunities!$L:$L,$H$1)<>"excluded"' in formula
     assert (
-        "REGEXMATCH(Opportunities!$W$2:INDEX(Opportunities!$W:$W,$H$1),"
+        "REGEXMATCH(Opportunities!$W$6:INDEX(Opportunities!$W:$W,$H$1),"
         '"^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}\\.\\d{6}Z$")' in formula
     )
-    assert "Opportunities!$W$2:INDEX(Opportunities!$W:$W,$H$1)>=$H$2" in formula
-    assert "Opportunities!$W$2:INDEX(Opportunities!$W:$W,$H$1)<$H$3" in formula
+    assert "Opportunities!$W$6:INDEX(Opportunities!$W:$W,$H$1)>=$H$2" in formula
+    assert "Opportunities!$W$6:INDEX(Opportunities!$W:$W,$H$1)<$H$3" in formula
 
 
 def test_applications_count_date_applied_inside_seven_inclusive_dates() -> None:
     formula = _cells()["B9"]
-    assert "Opportunities!$AB$2:INDEX(Opportunities!$AB:$AB,$H$1)" in formula
+    assert "Opportunities!$AB$6:INDEX(Opportunities!$AB:$AB,$H$1)" in formula
     assert "s>=TODAY()-6" in formula
     assert "s<=TODAY()" in formula
     assert "Opportunities!$AC" not in formula
@@ -293,7 +293,7 @@ def test_applications_count_date_applied_inside_seven_inclusive_dates() -> None:
 
 def test_upcoming_interviews_count_interview_date_inside_eight_inclusive_dates() -> None:
     formula = _cells()["B10"]
-    assert "Opportunities!$AE$2:INDEX(Opportunities!$AE:$AE,$H$1)" in formula
+    assert "Opportunities!$AE$6:INDEX(Opportunities!$AE:$AE,$H$1)" in formula
     assert "s>=TODAY()" in formula
     assert "s<=TODAY()+7" in formula
     assert "Opportunities!$AD" not in formula
@@ -328,8 +328,8 @@ def test_annotation_removal_matches_the_backend_pattern() -> None:
 def test_unreadable_date_formulas_count_non_blank_unparsed_values() -> None:
     applied = _cells()["B33"]
     interview = _cells()["B34"]
-    assert "Opportunities!$AB$2:INDEX(Opportunities!$AB:$AB,$H$1)" in applied
-    assert "Opportunities!$AE$2:INDEX(Opportunities!$AE:$AE,$H$1)" in interview
+    assert "Opportunities!$AB$6:INDEX(Opportunities!$AB:$AB,$H$1)" in applied
+    assert "Opportunities!$AE$6:INDEX(Opportunities!$AE:$AE,$H$1)" in interview
     for formula in (applied, interview):
         assert 'IF(TRIM(TO_TEXT(raw))="",0,IF(ok,0,1))' in formula
 
@@ -717,7 +717,7 @@ def test_the_id_id_dialect_uses_semicolon_separators() -> None:
     )
     assert cells["B22"] == "=MAX(0;$J$1-SUM($B$13:$B$20))"
     assert cells["H1"] == (
-        '=IFERROR(MAX(2;MAX(FILTER(ROW(Opportunities!$A:$A);Opportunities!$A:$A<>"")));2)'
+        '=IFERROR(MAX(6;MAX(FILTER(ROW(Opportunities!$A$6:$A);Opportunities!$A$6:$A<>"")));6)'
     )
 
 
@@ -993,7 +993,11 @@ def test_header_only_data_has_an_id_existence_guard_on_every_metric() -> None:
     cells = _cells()
     for address in _DISTINCT_METRIC_CELLS:
         for conditions, _ in _guard_terms(cells[address]):
-            assert "A$2:INDEX" in conditions[0] or "B$2:INDEX" in conditions[0], address
+            assert (
+                "A$6:INDEX" in conditions[0]
+                or "B$2:INDEX" in conditions[0]
+                or "C$2:INDEX" in conditions[0]
+            ), address
             assert '<>""' in conditions[0], address
 
 
@@ -1183,7 +1187,7 @@ def test_data_quality_formulas_are_balanced_and_reference_their_date_column() ->
             assert cell.is_formula, address
             assert cell.content.startswith("="), address
             assert _paren_depth(cell.content) == (0, 0), address
-            assert f"Opportunities!${column}$2:INDEX(Opportunities!${column}:${column}" in (
+            assert f"Opportunities!${column}$6:INDEX(Opportunities!${column}:${column}" in (
                 cell.content
             ), address
             assert r'"\s*\([^()]*\)\s*$"' in cell.content, address

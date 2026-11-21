@@ -17,6 +17,7 @@ from personal_job_finder_api.integrations.google_sheets import dashboard_layout 
 from personal_job_finder_api.integrations.google_sheets.client import GoogleSheetsClient
 from personal_job_finder_api.integrations.google_sheets.config import (
     JOB_SOURCE_HEADERS,
+    OPPORTUNITY_HEADER_ROW,
     OPPORTUNITY_HEADERS,
 )
 from personal_job_finder_api.integrations.google_sheets.dashboard import (
@@ -124,8 +125,20 @@ class DashboardTransport:
             raise AssertionError("dashboard-init must not use the raw values path")
         assert value_input_option == "RAW"
         for item in data:
-            tab = str(item["range"]).split("!", 1)[0]
-            self.tabs.setdefault(tab, []).insert(0, [str(value) for value in item["values"][0]])
+            tab, _, a1 = str(item["range"]).partition("!")
+            rows = self.tabs.setdefault(tab, [])
+            first = a1.split(":")[0]
+            match = _A1_PART.match(first)
+            row_number = int(match.group(2)) if match and match.group(2) else 1
+            column = _column_number(match.group(1)) if match and match.group(1) else 1
+            while len(rows) < row_number:
+                rows.append([])
+            target = rows[row_number - 1]
+            for offset, value in enumerate(item["values"][0]):
+                index = column - 1 + offset
+                while len(target) <= index:
+                    target.append("")
+                target[index] = str(value)
         return {}
 
     def batch_update_spreadsheet(
@@ -279,7 +292,8 @@ def _spreadsheet(
     legacy_dashboard: list[list[str]] | None = None,
 ) -> DashboardTransport:
     tabs: dict[str, list[list[str]]] = {
-        "Opportunities": [list(OPPORTUNITY_HEADERS)],
+        "Opportunities": [[""] for _ in range(OPPORTUNITY_HEADER_ROW - 1)]
+        + [list(OPPORTUNITY_HEADERS)],
         "Job_Sources": [list(JOB_SOURCE_HEADERS)],
     }
     if dashboard is not None:

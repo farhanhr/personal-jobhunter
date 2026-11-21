@@ -20,6 +20,8 @@ import pytest
 from personal_job_finder_api.integrations.google_sheets import live_check
 from personal_job_finder_api.integrations.google_sheets.config import (
     JOB_SOURCE_HEADERS,
+    OPPORTUNITY_FIRST_DATA_ROW,
+    OPPORTUNITY_HEADER_ROW,
     OPPORTUNITY_HEADERS,
 )
 from personal_job_finder_api.integrations.google_sheets.errors import GoogleSheetsError
@@ -65,8 +67,11 @@ class FakeClient:
 
 
 def _header_only() -> dict[str, list[list[str]]]:
+    """A workbook in the canonical layout: header at its contracted row."""
+
     return {
-        "Opportunities": [list(OPPORTUNITY_HEADERS)],
+        "Opportunities": [[""] for _ in range(OPPORTUNITY_HEADER_ROW - 1)]
+        + [list(OPPORTUNITY_HEADERS)],
         "Job_Sources": [list(JOB_SOURCE_HEADERS)],
     }
 
@@ -95,7 +100,10 @@ def test_a_sheet_with_data_rows_is_refused() -> None:
 
 def test_a_mismatched_header_row_is_refused() -> None:
     tabs = _header_only()
-    tabs["Opportunities"][0] = ["opportunity_id", "company_name"]
+    tabs["Opportunities"][OPPORTUNITY_HEADER_ROW - 1] = [
+        "opportunity_id",
+        "company_name",
+    ]
     snapshot = live_check.capture(FakeClient(tabs), SPREADSHEET_ID)
 
     with pytest.raises(live_check.LiveCheckError) as captured:
@@ -145,7 +153,9 @@ def test_a_snapshot_is_persisted_with_owner_only_permissions(tmp_path: Path) -> 
     assert stat.S_IMODE(path.parent.stat().st_mode) == 0o700
     payload = json.loads(path.read_text())
     assert payload["run_id"] == snapshot.run_id
-    assert payload["tabs"]["Opportunities"] == [list(OPPORTUNITY_HEADERS)]
+    assert payload["tabs"]["Opportunities"] == [[""] for _ in range(OPPORTUNITY_HEADER_ROW - 1)] + [
+        list(OPPORTUNITY_HEADERS)
+    ]
 
 
 def test_a_snapshot_never_contains_the_spreadsheet_id() -> None:
@@ -170,8 +180,10 @@ def test_restore_writes_the_captured_values_back() -> None:
 
     live_check.restore(client, SPREADSHEET_ID, snapshot)
 
-    assert client.tabs["Opportunities"][0] == list(OPPORTUNITY_HEADERS)
-    assert all(not any(row) for row in client.tabs["Opportunities"][1:])
+    header_row = OPPORTUNITY_HEADER_ROW - 1
+    assert client.tabs["Opportunities"][header_row] == list(OPPORTUNITY_HEADERS)
+    data_rows = client.tabs["Opportunities"][header_row + 1 :]
+    assert all(not any(row) for row in data_rows)
 
 
 def test_restore_clears_rows_the_run_appended() -> None:
@@ -182,8 +194,9 @@ def test_restore_clears_rows_the_run_appended() -> None:
 
     written = live_check.restore(client, SPREADSHEET_ID, snapshot)
 
-    assert any("A2:" in name for name in written)
-    assert all(row == [] or not any(row) for row in client.tabs["Opportunities"][1:])
+    assert any(f"A{OPPORTUNITY_FIRST_DATA_ROW}:" in name for name in written)
+    data_rows = client.tabs["Opportunities"][OPPORTUNITY_HEADER_ROW:]
+    assert all(row == [] or not any(row) for row in data_rows)
 
 
 def test_restore_refuses_when_the_header_row_changed() -> None:
@@ -191,7 +204,7 @@ def test_restore_refuses_when_the_header_row_changed() -> None:
     tabs["Opportunities"].append(["opp-1"])
     client = FakeClient(tabs)
     snapshot = live_check.capture(client, SPREADSHEET_ID)
-    client.tabs["Opportunities"][0] = ["something", "else"]
+    client.tabs["Opportunities"][OPPORTUNITY_HEADER_ROW - 1] = ["something", "else"]
 
     with pytest.raises(live_check.LiveCheckError) as captured:
         live_check.restore(client, SPREADSHEET_ID, snapshot)
@@ -392,7 +405,8 @@ def test_restore_retries_a_rate_limited_read_instead_of_abandoning() -> None:
     client.get_values = flaky  # type: ignore[method-assign]
     live_check.restore(client, SPREADSHEET_ID, snapshot, sleep=lambda _: None)
 
-    assert all(not any(row) for row in client.tabs["Opportunities"][1:])
+    data_rows = client.tabs["Opportunities"][OPPORTUNITY_HEADER_ROW:]
+    assert all(not any(row) for row in data_rows)
 
 
 # ---------------------------------------------------------------------- polling

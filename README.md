@@ -135,57 +135,70 @@ browser, and the resulting token is kept in your operating system's credential s
    `init` refuses to overwrite a non-empty header row that does not match the expected
    schema. Fix that case by hand; nothing is rewritten for you.
 
-8. Optionally build the workspace: summary cards plus an editable table.
+8. Build the workspace: a KPI strip plus an editable table.
 
    ```bash
-   uv run python -m personal_job_finder_api.integrations.google_sheets.cli dashboard-init
    uv run python -m personal_job_finder_api.integrations.google_sheets.cli sync
    ```
 
-   `dashboard-init` creates the `Dashboard` tab: six read-only cards (need to apply,
-   applied in the last 7 days, interviews in the next 7 days, offers, active, archived).
-   `sync` then runs the repair pass, which turns `Opportunities` into a native Sheets
-   table: banded rows, a frozen header, and a dropdown on `user_status` and
-   `application_status`. The dropdowns are suggestions, not constraints — `Ghosted` or
-   any other text you type stays exactly as typed.
+   `sync` runs the repair pass first, which puts `Opportunities` into its workspace
+   shape: four KPI cards in rows 1-3 (`Total Applied`, `Need to Apply`,
+   `Applied (last 7 days)`, `Interviews (next 7 days)`), the canonical header in row 5,
+   and a native Sheets table below it with banded rows, a frozen header, and a dropdown
+   on `user_status` and `application_status` for every data row. The dropdowns are
+   suggestions, not constraints — `Ghosted` or any other text you type stays exactly as
+   typed. The KPI cards are formulas on this tab; the app has its own dashboard and does
+   not read them.
 
    You work directly in the `Opportunities` table. Add a row by hand with a company and a
    job title and no `opportunity_id`; the next `sync` gives it a stable identity and keeps
    your values. Set `user_status` to `ignored` to archive a row: it leaves the active
-   count and the cards stop counting it, but nothing is deleted.
+   count and the KPI cards stop counting it, but nothing is deleted.
 
-   `sync` runs the repair pass first, so a cleared header or a deleted table is fixed
-   before any projection lands. To run the same repair on its own:
+   A spreadsheet created by an earlier version still has its header in row 1. The repair
+   moves it down once, inserting four rows above it; every value is preserved, and the
+   move never happens a second time. To run the repair on its own:
 
    ```bash
    uv run python -m personal_job_finder_api.integrations.google_sheets.cli workspace-repair
    ```
 
-   Repair changes structure only: headers, the native table, and the frozen panes. It
-   never changes a data value and writes nothing when the workbook is already healthy.
-   Add `--force` to reapply the table and frozen panes after deleting only a dropdown;
-   that is the one drift metadata cannot see.
+   Repair changes structure only: headers, the native table, the KPI strip, the status
+   dropdowns, and the frozen panes. It never changes a data value and writes nothing when
+   the workbook is already healthy. Add `--force` to reapply all of it after deleting a
+   card or a dropdown; that is the one drift metadata cannot see.
 
-   The older 25-metric board is still available as the `Metrics` tab:
+   The 25-metric board is still available as the optional `Metrics` tab:
 
    ```bash
    uv run python -m personal_job_finder_api.integrations.google_sheets.cli metrics-init
+   uv run python -m personal_job_finder_api.integrations.google_sheets.cli metrics-init --force
    ```
 
-   An existing `Dashboard` board from an earlier version is renamed to `Metrics`, never
-   deleted. Every tab here is a companion view, never a source of truth, and none is
-   required.
+   `--force` rewrites an existing board, which is what you need after the header moved
+   from row 1. An existing `Dashboard` board from an earlier version is renamed to
+   `Metrics`, never deleted. Every tab here is a companion view, never a source of truth,
+   and none is required.
 
-   To check both tabs without changing anything:
+   The retired `Dashboard` cards tab is deleted only when this project wrote it:
+
+   ```bash
+   uv run python -m personal_job_finder_api.integrations.google_sheets.cli dashboard-delete
+   ```
+
+   It refuses a tab it does not own, so a sheet you built by hand is left alone.
+
+   To check the KPI strip and the Metrics board without changing anything:
 
    ```bash
    uv run python -m personal_job_finder_api.integrations.google_sheets.cli dashboard-verify
    ```
 
-   This reads both tabs and both canonical tabs, recomputes every number independently, and
-   reports any cell that shows an error, a constant instead of a formula, or a number that
-   disagrees. It exits non-zero on a mismatch. A tab written by an older version of this
-   app is reported as unsupported: delete that tab and re-run its `-init` command.
+   This reads the strip, the Metrics board, and both canonical tabs, recomputes every
+   number independently, and reports any cell that shows an error, a constant instead of
+   a formula, or a number that disagrees. It exits non-zero on a mismatch. A tab written
+   by an older version of this app is reported as unsupported: delete that tab and re-run
+   its `-init` command.
 
 9. Copy new results into your sheet whenever you want:
 
@@ -240,10 +253,10 @@ are queued for your sheet and the dashboard shows what was found.
   first; a trailing note such as `(pagi)` is ignored when dates are counted. The app
   never rewrites what you typed, and those columns are deliberately not formatted as
   dates: a date format would turn `2026-11-18` into a number the tracker cannot read.
-- **The spreadsheet time zone must be `Asia/Jakarta`** for the optional spreadsheet
-  `Dashboard` date windows. The app never changes it for you.
-- **The spreadsheet locale must be `en_US`, `id_ID`, or `in_ID`** for the optional
-  spreadsheet `Dashboard`. `in_ID` is the legacy Google identifier for the same
+- **The spreadsheet time zone must be `Asia/Jakarta`** for the KPI strip and the
+  optional `Metrics` date windows. The app never changes it for you.
+- **The spreadsheet locale must be `en_US`, `id_ID`, or `in_ID`** for the KPI strip and
+  the optional `Metrics` board. `in_ID` is the legacy Google identifier for the same
   Indonesian locale as `id_ID`. Formulas use the locale's argument separator (comma or
   semicolon), so other locales are refused rather than producing broken cells.
 
@@ -252,7 +265,7 @@ are queued for your sheet and the dashboard shows what was found.
 The app is usable today: target roles, company sources, manual searches with the daily
 limit and cooldown, an in-app dashboard, an opportunities feed with a detail view, an
 application tracker, Google Sheets sign-in and synchronization, and an optional
-workspace `Dashboard` cards and an editable `Opportunities` table in your spreadsheet.
+KPI strip and an editable `Opportunities` table in your spreadsheet.
 
 Google Sheets support is implemented and covered by mocked tests, plus an opt-in live
 suite that runs a real round-trip against a disposable scratch spreadsheet. The default
@@ -260,10 +273,10 @@ suite that runs a real round-trip against a disposable scratch spreadsheet. The 
 supervised setup step.
 
 Still in progress: automatic search history in the sheet (there is no `Run_History` tab
-yet) and manual LinkedIn post import. The spreadsheet `Dashboard` is a companion view
-only; the app dashboard remains the place for operational state such as search limits,
-sync status, and target-role names. You can edit application-tracking fields in the app
-or in the sheet; the sheet stays canonical.
+yet) and manual LinkedIn post import. The spreadsheet KPI strip and the optional
+`Metrics` board are companion views only; the app dashboard remains the place for
+operational state such as search limits, sync status, and target-role names. You can edit
+application-tracking fields in the app or in the sheet; the sheet stays canonical.
 
 ## Reporting a security issue
 

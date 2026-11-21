@@ -107,6 +107,24 @@ REQUIRED_TABS: Mapping[str, tuple[str, ...]] = {
     "Job_Sources": JOB_SOURCE_HEADERS,
 }
 
+#: The canonical header row on ``Opportunities``. Rows 1-3 hold the KPI strip and
+#: row 4 is a spacer, so the native table starts at the header. Every sheet path
+#: must use these constants instead of assuming row 1; a missed literal would
+#: read the KPI cards as canonical data.
+OPPORTUNITY_HEADER_ROW = 5
+OPPORTUNITY_FIRST_DATA_ROW = OPPORTUNITY_HEADER_ROW + 1
+
+TAB_HEADER_ROWS: Mapping[str, int] = {
+    "Opportunities": OPPORTUNITY_HEADER_ROW,
+    "Job_Sources": 1,
+}
+
+
+def header_row_for(tab: str) -> int:
+    """The 1-based canonical header row for a tab."""
+
+    return TAB_HEADER_ROWS.get(tab, 1)
+
 
 @dataclass(frozen=True, slots=True)
 class GoogleSheetsConfig:

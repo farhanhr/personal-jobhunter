@@ -33,6 +33,7 @@ from personal_job_finder_api.integrations.google_sheets.config import (
     JOB_SOURCE_HEADERS,
     OPPORTUNITY_HEADERS,
     REQUIRED_TABS,
+    header_row_for,
 )
 from personal_job_finder_api.integrations.google_sheets.errors import GoogleSheetsError
 from personal_job_finder_api.repositories.read_model import ReadModelSettlementError
@@ -52,6 +53,8 @@ def _row_window(address: str) -> tuple[int | None, int | None]:
     """Return the row bounds of an A1 address such as ``A5:A5``.
 
     Column-only ranges (``A:AG``) have no row bounds and return ``(None, None)``.
+    An open-ended range (``A5:AG``) starts at its first row and runs to the end,
+    so its last bound is ``None``.
     """
 
     start, _, end = address.partition(":")
@@ -60,22 +63,36 @@ def _row_window(address: str) -> tuple[int | None, int | None]:
         return None, None
     first = int(digits)
     end_digits = "".join(ch for ch in end if ch.isdigit())
-    last = int(end_digits) if end_digits else first
-    return first, last
+    if end_digits:
+        return first, int(end_digits)
+    if end:
+        return first, None
+    return first, first
 
 
 class FakeSheet:
-    """In-memory spreadsheet with the parts of the Sheets API used here."""
+    """In-memory spreadsheet with the parts of the Sheets API used here.
+
+    Rows are stored from the canonical header down, so ``rows(tab)[0]`` is always
+    the header. ``first_rows`` records where that header sits on the real grid,
+    and the transport translates absolute sheet rows to this compact view.
+    """
 
     def __init__(self) -> None:
         self.tabs: dict[str, list[list[str]]] = {
             "Opportunities": [list(OPPORTUNITY_HEADERS)],
             "Job_Sources": [list(JOB_SOURCE_HEADERS)],
         }
+        self.first_rows: dict[str, int] = {tab: header_row_for(tab) for tab in self.tabs}
         self.calls: list[tuple[str, Any]] = []
 
     def rows(self, tab: str) -> list[list[str]]:
         return self.tabs[tab]
+
+    def row_at(self, tab: str, absolute_row: int) -> list[str]:
+        """The stored row for a 1-based absolute sheet row."""
+
+        return self.tabs[tab][absolute_row - self.first_rows[tab]]
 
     def identity_column(self, tab: str) -> int:
         return 0
@@ -85,10 +102,11 @@ class FakeSheet:
         key_index = 0
         column = REQUIRED_TABS[tab][key_index]
         assert header[key_index] == column
+        offset = self.first_rows[tab] - 1
         mapping: dict[str, int] = {}
         for index, row in enumerate(self.tabs[tab][1:], start=2):
             value = row[key_index] if row else ""
-            mapping[value] = index
+            mapping[value] = index + offset
         return mapping
 
 
@@ -119,13 +137,17 @@ class FakeTransport:
         for requested in ranges:
             tab, address = requested.split("!", 1)
             rows = self.sheet.tabs.get(tab, [])
+            offset = self.sheet.first_rows.get(tab, 1) - 1
             first, last = _row_window(address)
             if first is None:
                 value_ranges.append({"values": [list(row) for row in rows]} if rows else {})
                 continue
-            # Honour the requested row window like the real API does; rows past the
-            # end of the tab come back as an absent entry, not as blank rows.
-            selected = rows[first - 1 : last] if first <= len(rows) else []
+            stored_first = first - offset
+            if stored_first < 1 or stored_first > len(rows):
+                value_ranges.append({})
+                continue
+            stop = len(rows) if last is None else last - offset
+            selected = rows[stored_first - 1 : stop]
             value_ranges.append({"values": [list(row) for row in selected]} if selected else {})
         return {"valueRanges": value_ranges}
 
@@ -144,9 +166,11 @@ class FakeTransport:
             tab = range_name.split("!", 1)[0]
             address = range_name.split("!", 1)[1]
             start_cell = address.split(":", 1)[0]
-            start_row = int("".join(ch for ch in start_cell if ch.isdigit()))
-            for offset, values in enumerate(item["values"]):
-                row_number = start_row + offset
+            absolute_row = int("".join(ch for ch in start_cell if ch.isdigit()))
+            offset = self.sheet.first_rows.get(tab, 1) - 1
+            start_row = absolute_row - offset
+            for row_index, values in enumerate(item["values"]):
+                row_number = start_row + row_index
                 rows = self.sheet.tabs[tab]
                 while len(rows) < row_number:
                     rows.append([""] * len(rows[0]))
@@ -2023,7 +2047,7 @@ def test_an_earlier_verified_chunk_stays_synced_when_a_later_chunk_is_ambiguous(
         if str(data[0]["range"]).startswith("Opportunities!"):
             address = str(data[0]["range"]).split("!", 1)[1].split(":", 1)[0]
             row_number = int("".join(ch for ch in address if ch.isdigit()))
-            written_ids.append(sheet.rows("Opportunities")[row_number - 1][0])
+            written_ids.append(sheet.row_at("Opportunities", row_number)[0])
             if len(written_ids) == 2:
                 return {"totalUpdatedRows": 0}
         return response

@@ -15,7 +15,10 @@ from personal_job_finder_api.integrations.google_sheets.client import (
     GoogleSheetsClient,
     SheetsTransport,
 )
-from personal_job_finder_api.integrations.google_sheets.config import REQUIRED_TABS
+from personal_job_finder_api.integrations.google_sheets.config import (
+    REQUIRED_TABS,
+    TAB_HEADER_ROWS,
+)
 from personal_job_finder_api.integrations.google_sheets.errors import GoogleSheetsError
 
 
@@ -93,6 +96,7 @@ class SpreadsheetPreflightService:
         header_rows = self._client.get_header_rows(
             spreadsheet_id,
             existing_tabs,
+            header_rows=TAB_HEADER_ROWS,
         )
 
         tabs: dict[str, TabSchema] = {}
@@ -143,7 +147,11 @@ class SpreadsheetPreflightService:
             title: REQUIRED_TABS[title] for title in [*tabs_to_create, *tabs_to_fill]
         }
         if headers_to_write:
-            self._client.write_headers(spreadsheet_id, headers_to_write)
+            self._client.write_headers(
+                spreadsheet_id,
+                headers_to_write,
+                header_rows=TAB_HEADER_ROWS,
+            )
 
         final = self.check(spreadsheet_id)
         if not final.is_ready:

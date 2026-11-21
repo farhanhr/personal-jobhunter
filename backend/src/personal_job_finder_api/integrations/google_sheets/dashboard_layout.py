@@ -25,6 +25,10 @@ from collections.abc import Mapping
 from dataclasses import dataclass
 from typing import Final
 
+from personal_job_finder_api.integrations.google_sheets.config import (
+    OPPORTUNITY_FIRST_DATA_ROW,
+)
+
 #: Internal placeholder for a function argument separator. Formulas are authored
 #: once with this marker, then rendered for the spreadsheet's locale. Because a
 #: literal comma never uses this marker, literal text and regex patterns can
@@ -178,10 +182,12 @@ def _opportunities_range(column: str, bound: str = "$H$1") -> str:
     silently truncate every row after the first interior blank key cell.
 
     ``bound`` is configurable so a second sheet can carry its own helper instead
-    of depending on this one's.
+    of depending on this one's. The range starts at the first canonical data row,
+    which is below the KPI strip on ``Opportunities``.
     """
 
-    return f"Opportunities!${column}$2:INDEX(Opportunities!${column}:${column}{ARG}{bound})"
+    start = OPPORTUNITY_FIRST_DATA_ROW
+    return f"Opportunities!${column}${start}:INDEX(Opportunities!${column}:${column}{ARG}{bound})"
 
 
 def _sources_range(column: str) -> str:
@@ -198,7 +204,9 @@ _OPP_INTERVIEW_DATE = _opportunities_range(_OPP_INTERVIEW_DATE_COLUMN)
 _SRC_OPPORTUNITY = _sources_range(_SRC_OPPORTUNITY_COLUMN)
 _SRC_TYPE = _sources_range(_SRC_TYPE_COLUMN)
 
-_OPP_ID_AND_LOCATION_STATUS = f"Opportunities!$A$2:INDEX(Opportunities!$L:$L{ARG}$H$1)"
+_OPP_ID_AND_LOCATION_STATUS = (
+    f"Opportunities!$A${OPPORTUNITY_FIRST_DATA_ROW}:INDEX(Opportunities!$L:$L{ARG}$H$1)"
+)
 
 _OPP_ROW_EXISTS = f'{_OPP_ID}<>""'
 _OPP_NOT_EXCLUDED = f'{_OPP_LOCATION_STATUS}<>"excluded"'
@@ -397,7 +405,10 @@ _AS_OF_FORMULA = (
 #: Google Sheets: it returns the fallback on every sheet, which silently pinned
 #: every metric range to row 2. Verified live against the scratch spreadsheet.
 _LAST_OPPORTUNITY_ROW = (
-    f'=IFERROR(MAX(2{ARG}MAX(FILTER(ROW(Opportunities!$A:$A){ARG}Opportunities!$A:$A<>""))){ARG}2)'
+    f"=IFERROR(MAX({OPPORTUNITY_FIRST_DATA_ROW}{ARG}"
+    f"MAX(FILTER(ROW(Opportunities!$A${OPPORTUNITY_FIRST_DATA_ROW}:$A)"
+    f'{ARG}Opportunities!$A${OPPORTUNITY_FIRST_DATA_ROW}:$A<>"")))'
+    f"{ARG}{OPPORTUNITY_FIRST_DATA_ROW})"
 )
 _LAST_SOURCE_ROW = (
     f'=IFERROR(MAX(2{ARG}MAX(FILTER(ROW(Job_Sources!$A:$A){ARG}Job_Sources!$A:$A<>""))){ARG}2)'

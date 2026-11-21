@@ -18,7 +18,7 @@ from datetime import date
 
 from personal_job_finder_api.integrations.google_sheets import dashboard_layout as layout
 from personal_job_finder_api.integrations.google_sheets import dashboard_oracle as oracle
-from personal_job_finder_api.integrations.google_sheets import workspace_layout as workspace
+from personal_job_finder_api.integrations.google_sheets import kpi_strip
 from personal_job_finder_api.integrations.google_sheets.client import (
     UNFORMATTED_RENDER_OPTION,
     GoogleSheetsClient,
@@ -28,9 +28,10 @@ from personal_job_finder_api.integrations.google_sheets.client import (
 from personal_job_finder_api.integrations.google_sheets.config import (
     JOB_SOURCE_HEADERS,
     OPPORTUNITY_HEADERS,
+    header_row_for,
 )
 
-CARD_CELLS: tuple[str, ...] = workspace.CARD_CELLS
+CARD_CELLS: tuple[str, ...] = oracle.KPI_STRIP_CELLS
 
 #: Cells whose value is a metric. Everything else in the tab is a label or a note.
 METRIC_CELLS: tuple[str, ...] = tuple(
@@ -132,16 +133,19 @@ def read_canonical_rows(
     """Read both canonical tabs as header-keyed rows.
 
     ``UNFORMATTED_VALUE`` is used so a tracker date is read as stored text rather
-    than through the spreadsheet locale's display format.
+    than through the spreadsheet locale's display format. Each read starts at the
+    tab's canonical header row, so the KPI strip above ``Opportunities`` is never
+    mistaken for a header.
     """
 
+    ranges = [f"{tab}!A{header_row_for(tab)}:ZZ" for tab in ("Opportunities", "Job_Sources")]
     values = client.get_values(
         spreadsheet_id,
-        ["Opportunities", "Job_Sources"],
+        ranges,
         value_render_option=UNFORMATTED_RENDER_OPTION,
     )
-    opportunities = _rows_to_dicts(values["Opportunities"], OPPORTUNITY_HEADERS)
-    sources = _rows_to_dicts(values["Job_Sources"], JOB_SOURCE_HEADERS)
+    opportunities = _rows_to_dicts(values[ranges[0]], OPPORTUNITY_HEADERS)
+    sources = _rows_to_dicts(values[ranges[1]], JOB_SOURCE_HEADERS)
     return opportunities, sources
 
 
@@ -198,15 +202,17 @@ def read_card_cells(
     client: GoogleSheetsClient,
     spreadsheet_id: str,
 ) -> dict[str, GridCell]:
-    """Read every summary-card cell."""
+    """Read the four KPI value cells on ``Opportunities``."""
 
-    return read_cells(
-        client,
-        spreadsheet_id,
-        tab=workspace.DASHBOARD_TAB,
-        addresses=CARD_CELLS,
-        sentinel_address=workspace.SENTINEL_CELL,
-    )
+    range_name = "Opportunities!A1:P3"
+    grid = client.get_grid(spreadsheet_id, [range_name])
+    wanted = set(CARD_CELLS)
+    cells: dict[str, GridCell] = {}
+    for row in grid.get(range_name) or []:
+        for cell in row:
+            if cell.address in wanted:
+                cells[cell.address] = cell
+    return cells
 
 
 def _normalize_actual(value: str | None) -> str:
@@ -305,18 +311,6 @@ def verify_dashboard(
     problems: list[str] = []
     metadata = metadata or client.get_metadata(spreadsheet_id)
 
-    wanted_tabs = [
-        tab for tab in (workspace.DASHBOARD_TAB, layout.METRICS_TAB) if tab in metadata.titles
-    ]
-    if not wanted_tabs:
-        return VerifyReport(
-            locale=metadata.locale,
-            time_zone=metadata.time_zone,
-            tabs=metadata.titles,
-            checks=(),
-            problems=("Neither the Dashboard cards tab nor the Metrics board exists.",),
-        )
-
     if metadata.time_zone != layout.DASHBOARD_TIMEZONE:
         problems.append(
             f"The spreadsheet time zone is {metadata.time_zone or 'unset'}, "
@@ -337,31 +331,33 @@ def verify_dashboard(
     projected = oracle.opportunity_rows(opportunities)
     checks: list[MetricCheck] = []
 
-    if workspace.DASHBOARD_TAB in metadata.titles:
-        cards_expected = oracle.compute_cards(projected, as_of=as_of)
-        cards = read_card_cells(client, spreadsheet_id)
-        sentinel = _literal(cards, workspace.SENTINEL_CELL)
-        if sentinel != workspace.DASHBOARD_SENTINEL:
-            problems.append(
-                "The Dashboard cards sentinel is missing or different, so the tab is "
-                "not owned by this version. Delete the tab and run dashboard-init."
-            )
-        checks.extend(compare(cards_expected, cards, CARD_CELLS, tab=workspace.DASHBOARD_TAB))
+    strip_expected = oracle.compute_kpi_strip(projected, as_of=as_of)
+    strip_cells = read_card_cells(client, spreadsheet_id)
+    checks.extend(compare(strip_expected, strip_cells, CARD_CELLS, tab=kpi_strip.OPPORTUNITY_TAB))
 
-    if layout.METRICS_TAB in metadata.titles:
-        metrics_expected = oracle.compute(
-            projected,
-            oracle.source_rows(sources),
-            as_of=as_of,
+    if layout.METRICS_TAB not in metadata.titles:
+        problems.append("The Metrics board does not exist.")
+        return VerifyReport(
+            locale=metadata.locale,
+            time_zone=metadata.time_zone,
+            tabs=metadata.titles,
+            checks=tuple(checks),
+            problems=tuple(problems),
         )
-        metrics = read_metric_cells(client, spreadsheet_id)
-        sentinel = _literal(metrics, layout.SENTINEL_CELL)
-        if sentinel != layout.METRICS_SENTINEL:
-            problems.append(
-                "The Metrics sentinel is missing or different, so the tab is not "
-                "owned by this version. Delete the tab and run metrics-init."
-            )
-        checks.extend(compare(metrics_expected, metrics, METRIC_CELLS, tab=layout.METRICS_TAB))
+
+    metrics_expected = oracle.compute(
+        projected,
+        oracle.source_rows(sources),
+        as_of=as_of,
+    )
+    metrics = read_metric_cells(client, spreadsheet_id)
+    sentinel = _literal(metrics, layout.SENTINEL_CELL)
+    if sentinel != layout.METRICS_SENTINEL:
+        problems.append(
+            "The Metrics sentinel is missing or different, so the tab is not "
+            "owned by this version. Delete the tab and run metrics-init."
+        )
+    checks.extend(compare(metrics_expected, metrics, METRIC_CELLS, tab=layout.METRICS_TAB))
 
     return VerifyReport(
         locale=metadata.locale,

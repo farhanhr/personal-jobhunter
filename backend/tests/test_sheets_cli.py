@@ -300,40 +300,113 @@ class StubDashboardFoundation:
         *,
         result: Any = None,
         error: Exception | None = None,
+        removal: str = "Deleted the retired Dashboard cards tab.",
+        removal_error: Exception | None = None,
     ) -> None:
         self._result = result
         self._error = error
+        self._removal = removal
+        self._removal_error = removal_error
         self.dashboard_calls = 0
+        self.force_calls: list[bool] = []
+        self.removal_calls = 0
 
     def check(self) -> PreflightResult:
-        raise AssertionError("dashboard-init must not run preflight")
+        raise AssertionError("this command must not run preflight")
 
     def initialize(self) -> PreflightResult:
-        raise AssertionError("dashboard-init must not run canonical init")
+        raise AssertionError("this command must not run canonical init")
 
-    def initialize_workspace(self) -> Any:
-        """The cards tab is what ``dashboard-init`` initializes."""
+    def initialize_dashboard(self, *, force: bool = False) -> Any:
+        """The metric board is ``metrics-init``."""
 
         self.dashboard_calls += 1
+        self.force_calls.append(force)
         if self._error is not None:
             raise self._error
         return self._result
 
-    def initialize_dashboard(self) -> Any:
-        """The metric board is ``metrics-init``."""
+    def remove_dashboard(self) -> str:
+        """The retired cards tab is ``dashboard-delete``."""
 
-        raise AssertionError("dashboard-init must not initialize the metric board")
+        self.removal_calls += 1
+        if self._removal_error is not None:
+            raise self._removal_error
+        return self._removal
 
 
-def test_dashboard_init_is_an_explicit_command() -> None:
+def test_metrics_init_is_an_explicit_command() -> None:
     parser = cli_module._build_parser()
 
-    arguments = parser.parse_args(["dashboard-init"])
+    arguments = parser.parse_args(["metrics-init"])
 
-    assert arguments.command == "dashboard-init"
+    assert arguments.command == "metrics-init"
 
 
-def test_dashboard_init_prints_the_success_message(
+def test_dashboard_init_is_no_longer_a_command() -> None:
+    """The cards tab is retired, so nothing may recreate it."""
+
+    parser = cli_module._build_parser()
+
+    with pytest.raises(SystemExit):
+        parser.parse_args(["dashboard-init"])
+
+
+def test_dashboard_delete_is_an_explicit_command() -> None:
+    parser = cli_module._build_parser()
+
+    arguments = parser.parse_args(["dashboard-delete"])
+
+    assert arguments.command == "dashboard-delete"
+
+
+def test_dashboard_delete_prints_the_outcome(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    foundation = StubDashboardFoundation()
+    monkeypatch.setattr(
+        cli_module,
+        "build_google_sheets_foundation",
+        lambda settings: foundation,
+    )
+
+    exit_code = cli_module.main(["dashboard-delete"])
+
+    output = capsys.readouterr()
+    assert exit_code == 0
+    assert "Deleted the retired Dashboard cards tab." in output.out
+    assert foundation.removal_calls == 1
+    assert SPREADSHEET_ID not in output.out
+    assert SPREADSHEET_ID not in output.err
+
+
+def test_dashboard_delete_reports_a_refusal_with_a_stable_code(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    foundation = StubDashboardFoundation(
+        removal_error=GoogleSheetsError(
+            "dashboard_version_unsupported",
+            "The Dashboard tab carries a different cards version.",
+        )
+    )
+    monkeypatch.setattr(
+        cli_module,
+        "build_google_sheets_foundation",
+        lambda settings: foundation,
+    )
+
+    exit_code = cli_module.main(["dashboard-delete"])
+
+    output = capsys.readouterr()
+    assert exit_code == 1
+    assert "dashboard_version_unsupported" in output.err
+    assert SPREADSHEET_ID not in output.out
+    assert SPREADSHEET_ID not in output.err
+
+
+def test_metrics_init_prints_the_success_message(
     monkeypatch: pytest.MonkeyPatch,
     capsys: pytest.CaptureFixture[str],
 ) -> None:
@@ -345,7 +418,7 @@ def test_dashboard_init_prints_the_success_message(
     foundation = StubDashboardFoundation(
         result=MetricsInitResult(
             state=MetricsInitState.CREATED,
-            message="Dashboard cards tab created and initialized.",
+            message="Metrics board created and initialized.",
         )
     )
     monkeypatch.setattr(
@@ -354,24 +427,32 @@ def test_dashboard_init_prints_the_success_message(
         lambda settings: foundation,
     )
 
-    exit_code = cli_module.main(["dashboard-init"])
+    exit_code = cli_module.main(["metrics-init"])
 
     output = capsys.readouterr()
     assert exit_code == 0
-    assert "Dashboard cards tab created and initialized." in output.out
+    assert "Metrics board created and initialized." in output.out
     assert foundation.dashboard_calls == 1
+    assert foundation.force_calls == [False]
     assert SPREADSHEET_ID not in output.out
     assert SPREADSHEET_ID not in output.err
 
 
-def test_dashboard_init_reports_a_refusal_with_a_stable_code(
+def test_metrics_init_passes_force_through(
     monkeypatch: pytest.MonkeyPatch,
     capsys: pytest.CaptureFixture[str],
 ) -> None:
+    """After the header moves, an existing board needs its formulas rewritten."""
+
+    from personal_job_finder_api.integrations.google_sheets.dashboard import (
+        MetricsInitResult,
+        MetricsInitState,
+    )
+
     foundation = StubDashboardFoundation(
-        error=GoogleSheetsError(
-            "dashboard_tab_not_owned",
-            "The Dashboard tab already contains data.",
+        result=MetricsInitResult(
+            state=MetricsInitState.INITIALIZED,
+            message="Metrics board already initialized.",
         )
     )
     monkeypatch.setattr(
@@ -380,13 +461,11 @@ def test_dashboard_init_reports_a_refusal_with_a_stable_code(
         lambda settings: foundation,
     )
 
-    exit_code = cli_module.main(["dashboard-init"])
+    exit_code = cli_module.main(["metrics-init", "--force"])
 
-    output = capsys.readouterr()
-    assert exit_code == 1
-    assert "dashboard_tab_not_owned" in output.err
-    assert SPREADSHEET_ID not in output.out
-    assert SPREADSHEET_ID not in output.err
+    capsys.readouterr()
+    assert exit_code == 0
+    assert foundation.force_calls == [True]
 
 
 def test_canonical_init_never_calls_the_dashboard_initializer(
@@ -416,8 +495,8 @@ class _CanonicalInitFoundation:
     def initialize(self) -> PreflightResult:
         return _ready_result()
 
-    def initialize_dashboard(self) -> Any:
-        return self._dashboard.initialize_dashboard()
+    def initialize_dashboard(self, *, force: bool = False) -> Any:
+        return self._dashboard.initialize_dashboard(force=force)
 
 
 def test_sync_prepares_the_local_schema_before_dispatching(
@@ -501,7 +580,7 @@ def test_a_database_failure_is_reported_with_a_stable_code(
     assert "sync_outbox" not in output.err
 
 
-def test_the_real_foundation_exposes_both_initializers() -> None:
+def test_the_real_foundation_exposes_the_dashboard_commands() -> None:
     """Regression: the CLI called a method the foundation did not have.
 
     The stubbed CLI tests could not catch it, because they replace the foundation
@@ -512,28 +591,25 @@ def test_the_real_foundation_exposes_both_initializers() -> None:
         GoogleSheetsFoundation,
     )
 
-    assert hasattr(GoogleSheetsFoundation, "initialize_workspace")
+    assert hasattr(GoogleSheetsFoundation, "remove_dashboard")
     assert hasattr(GoogleSheetsFoundation, "initialize_dashboard")
     assert hasattr(GoogleSheetsFoundation, "repair_workspace")
+    assert not hasattr(GoogleSheetsFoundation, "initialize_workspace")
 
 
-def test_dashboard_init_and_metrics_init_target_different_services(
+def test_dashboard_delete_and_metrics_init_target_different_services(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """One command per tab, so neither can silently initialize the other."""
+    """One command per tab, so neither can silently act on the other."""
 
     calls: list[str] = []
 
     class RecordingFoundation:
-        def initialize_workspace(self):
-            calls.append("workspace")
+        def remove_dashboard(self):
+            calls.append("delete")
+            return "deleted"
 
-            class Result:
-                message = "workspace"
-
-            return Result()
-
-        def initialize_dashboard(self):
+        def initialize_dashboard(self, *, force: bool = False):
             calls.append("metrics")
 
             class Result:
@@ -545,9 +621,9 @@ def test_dashboard_init_and_metrics_init_target_different_services(
         cli_module, "build_google_sheets_foundation", lambda settings: RecordingFoundation()
     )
 
-    assert cli_module.main(["dashboard-init"]) == 0
+    assert cli_module.main(["dashboard-delete"]) == 0
     assert cli_module.main(["metrics-init"]) == 0
-    assert calls == ["workspace", "metrics"]
+    assert calls == ["delete", "metrics"]
 
 
 # --------------------------------------------------------------- workspace repair

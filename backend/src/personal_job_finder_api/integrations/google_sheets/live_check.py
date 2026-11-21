@@ -32,7 +32,9 @@ from personal_job_finder_api.integrations.google_sheets.client import (
 )
 from personal_job_finder_api.integrations.google_sheets.config import (
     JOB_SOURCE_HEADERS,
+    OPPORTUNITY_FIRST_DATA_ROW,
     OPPORTUNITY_HEADERS,
+    header_row_for,
 )
 from personal_job_finder_api.integrations.google_sheets.errors import GoogleSheetsError
 
@@ -164,12 +166,14 @@ def assert_disposable(snapshot: Snapshot, *, allow_data: bool = False) -> None:
         ("Job_Sources", JOB_SOURCE_HEADERS),
     ):
         rows = snapshot.tabs.get(title, [])
-        if rows and [cell.strip() for cell in rows[0]] != list(headers):
+        header_row = header_row_for(title)
+        stored = rows[header_row - 1] if len(rows) >= header_row else []
+        if stored and [cell.strip() for cell in stored] != list(headers):
             raise LiveCheckError(
                 f"The {title} header row does not match the canonical contract. "
                 "Run `init` first. Nothing was written."
             )
-        data_rows = [row for row in rows[1:] if any(cell != "" for cell in row)]
+        data_rows = [row for row in rows[header_row:] if any(cell != "" for cell in row)]
         if data_rows and not allow_data:
             raise LiveCheckError(
                 f"The {title} tab already holds {len(data_rows)} data row(s). "
@@ -236,8 +240,11 @@ def restore(
     for title, original in snapshot.tabs.items():
         now = current.get(title, [])
         if original:
-            captured_header = [cell.strip() for cell in original[0]]
-            current_header = [cell.strip() for cell in (now[0] if now else [])]
+            header_row = header_row_for(title) - 1
+            captured_header = [cell.strip() for cell in original[header_row]]
+            current_header = [
+                cell.strip() for cell in (now[header_row] if len(now) > header_row else [])
+            ]
             if current_header != captured_header:
                 raise LiveCheckError(
                     f"The {title} header row changed during the run, so the tab was "
@@ -281,6 +288,9 @@ def clear_data_rows(
     A scenario that starts from "no opportunities" needs an empty tab. Deleting
     rows would change the tab structure, so the rows are blanked instead; the
     caller must have captured a snapshot first, because this is destructive.
+
+    On ``Opportunities`` the blanking starts at the first canonical data row, so
+    the KPI strip above the header is never cleared.
     """
 
     for title in tabs:
@@ -292,12 +302,13 @@ def clear_data_rows(
             ),
             sleep=sleep,
         ).get(title, [])
-        if len(rows) <= 1:
+        first_data_row = header_row_for(title) + 1
+        if len(rows) < first_data_row:
             continue
-        width = len(rows[0])
+        width = max(len(row) for row in rows)
         end = len(rows)
-        blanked = [[""] * width for _ in range(end - 1)]
-        range_name = f"{title}!A2:{_letters(width)}{end}"
+        blanked = [[""] * width for _ in range(end - first_data_row + 1)]
+        range_name = f"{title}!A{first_data_row}:{_letters(width)}{end}"
 
         def _blank(
             name: str = range_name,
@@ -462,13 +473,21 @@ def build_fixture(*, as_of: date, run_id: str) -> LiveFixture:
 
 
 def expected_metrics(fixture: LiveFixture, *, as_of: date) -> oracle.ExpectedMetrics:
-    """The oracle's expectation for a fixture, computed from its records."""
+    """The oracle's expectation for a fixture, computed from its records.
 
-    return oracle.compute(
-        oracle.opportunity_rows(fixture.opportunities),
+    Both surfaces are included: the optional Metrics board and the KPI strip on
+    ``Opportunities``. They share one oracle projection, so a fixture only has to
+    be written once.
+    """
+
+    projected = oracle.opportunity_rows(fixture.opportunities)
+    metrics = oracle.compute(
+        projected,
         oracle.source_rows(fixture.sources),
         as_of=as_of,
     )
+    strip = oracle.compute_kpi_strip(projected, as_of=as_of)
+    return oracle.ExpectedMetrics(values={**metrics.values, **strip.values})
 
 
 # ------------------------------------------------------------------ scenarios
@@ -712,9 +731,21 @@ def run_scenario(
 
     clear_data_rows(client, spreadsheet_id)
     if fixture.opportunities:
-        write_rows(client, spreadsheet_id, "Opportunities", fixture.opportunity_rows(), start_row=2)
+        write_rows(
+            client,
+            spreadsheet_id,
+            "Opportunities",
+            fixture.opportunity_rows(),
+            start_row=OPPORTUNITY_FIRST_DATA_ROW,
+        )
     if fixture.sources:
-        write_rows(client, spreadsheet_id, "Job_Sources", fixture.source_rows(), start_row=2)
+        write_rows(
+            client,
+            spreadsheet_id,
+            "Job_Sources",
+            fixture.source_rows(),
+            start_row=header_row_for("Job_Sources") + 1,
+        )
 
     expected = expected_metrics(fixture, as_of=as_of)
     row_mismatch = _row_round_trip(client, spreadsheet_id, fixture)
@@ -759,12 +790,19 @@ def _row_round_trip(
         ("Opportunities", OPPORTUNITY_HEADERS, fixture.opportunities),
         ("Job_Sources", JOB_SOURCE_HEADERS, fixture.sources),
     ):
-        stored = [row for row in values.get(title, [])[1:] if any(cell != "" for cell in row)]
+        first_data_row = header_row_for(title) + 1
+        stored = [
+            row
+            for row in values.get(title, [])[first_data_row - 1 :]
+            if any(cell != "" for cell in row)
+        ]
         wanted = [[record.get(column, "") for column in headers] for record in records]
         wanted = [row for row in wanted if any(cell != "" for cell in row)]
         if len(stored) != len(wanted):
             return f"{title} holds {len(stored)} row(s), the scenario wrote {len(wanted)}"
-        for index, (actual, expected_row) in enumerate(zip(stored, wanted, strict=True), start=2):
+        for index, (actual, expected_row) in enumerate(
+            zip(stored, wanted, strict=True), start=first_data_row
+        ):
             trimmed = (list(actual) + [""] * len(headers))[: len(headers)]
             if trimmed != expected_row:
                 differing = [

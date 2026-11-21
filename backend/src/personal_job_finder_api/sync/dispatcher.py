@@ -40,6 +40,7 @@ from personal_job_finder_api.integrations.google_sheets.config import (
     JOB_SOURCE_HEADERS,
     OPPORTUNITY_HEADERS,
     GoogleSheetsConfig,
+    header_row_for,
 )
 from personal_job_finder_api.integrations.google_sheets.errors import GoogleSheetsError
 from personal_job_finder_api.repositories.opportunities import (
@@ -171,18 +172,25 @@ def dispatch_guard() -> Iterator[None]:
 
 @dataclass(frozen=True, slots=True)
 class _TableState:
-    """The identity layout of one tab, read once per dispatch."""
+    """The identity layout of one tab, read once per dispatch.
+
+    ``rows`` starts at the tab's canonical header row, so ``first_row`` is the
+    1-based sheet row of ``rows[0]``. Positions and ``row()`` use absolute sheet
+    row numbers, which is what the writer and the identity map speak.
+    """
 
     rows: tuple[tuple[str, ...], ...]
     positions: Mapping[str, int]
+    first_row: int = 1
 
     @property
     def next_free_row(self) -> int:
-        return len(self.rows) + 1
+        return self.first_row + len(self.rows)
 
     def row(self, row_number: int) -> tuple[str, ...] | None:
-        if 1 <= row_number <= len(self.rows):
-            return self.rows[row_number - 1]
+        index = row_number - self.first_row
+        if 0 <= index < len(self.rows):
+            return self.rows[index]
         return None
 
     def duplicates(self) -> frozenset[str]:
@@ -229,11 +237,19 @@ def _identity_at(actual: Mapping[int, str], row: int) -> str | None:
     return actual.get(row)
 
 
-def _parse_identity_map(rows: Sequence[Sequence[str]]) -> dict[int, str]:
-    """Map every populated canonical row to its identity, skipping the header."""
+def _parse_identity_map(
+    rows: Sequence[Sequence[str]],
+    *,
+    first_data_row: int,
+) -> dict[int, str]:
+    """Map every populated canonical row to its identity, skipping the header.
+
+    ``first_data_row`` is the 1-based row number of ``rows[1]``. It keeps the
+    absolute row numbers correct now that the canonical header is not row 1.
+    """
 
     identities: dict[int, str] = {}
-    for row_number, row in enumerate(rows[1:], start=2):
+    for row_number, row in enumerate(rows[1:], start=first_data_row):
         identity = row[0] if row else ""
         if identity:
             identities[row_number] = identity
@@ -584,7 +600,8 @@ class SyncDispatcher:
     def _read_table(self, tab: str) -> _TableState:
         headers = TAB_HEADERS[tab]
         last_column = column_letter(len(headers))
-        requested = f"{tab}!A:{last_column}"
+        header_row = header_row_for(tab)
+        requested = f"{tab}!A{header_row}:{last_column}"
         values = self._client.get_values(self._spreadsheet_id, [requested])
         rows = tuple(tuple(row) for row in values.get(requested, []))
         if not rows:
@@ -593,8 +610,8 @@ class SyncDispatcher:
                 "The required spreadsheet tab has no header row.",
             )
 
-        header_row = tuple(cell for cell in rows[0][: len(headers)])
-        if header_row != headers:
+        current_header = tuple(cell for cell in rows[0][: len(headers)])
+        if current_header != headers:
             # Writing against a reordered header would silently put values in the
             # wrong columns, so refuse until the user fixes the sheet.
             raise GoogleSheetsError(
@@ -603,7 +620,7 @@ class SyncDispatcher:
             )
 
         positions: dict[str, int] = {}
-        for row_number, row in enumerate(rows[1:], start=2):
+        for row_number, row in enumerate(rows[1:], start=header_row + 1):
             identity = row[0] if row else ""
             if not identity:
                 continue
@@ -613,7 +630,7 @@ class SyncDispatcher:
                 positions[identity] = -1
                 continue
             positions[identity] = row_number
-        return _TableState(rows=rows, positions=positions)
+        return _TableState(rows=rows, positions=positions, first_row=header_row)
 
     def _write(self, tab: str, planned: Sequence[_PlannedWrite]) -> dict[str, Any]:
         last_column = column_letter(len(TAB_HEADERS[tab]))
@@ -638,9 +655,13 @@ class SyncDispatcher:
         overwrite does not create a duplicate identity.
         """
 
-        identity_range = f"{tab}!A:A"
+        header_row = header_row_for(tab)
+        identity_range = f"{tab}!A{header_row}:A"
         values = self._client.get_values(self._spreadsheet_id, [identity_range])
-        return _parse_identity_map(values.get(identity_range, []))
+        return _parse_identity_map(
+            values.get(identity_range, []),
+            first_data_row=header_row + 1,
+        )
 
     def _revalidate(
         self,
@@ -663,9 +684,13 @@ class SyncDispatcher:
 
         if not planned:
             return [], [], {}
-        identity_range = f"{tab}!A:A"
+        header_row = header_row_for(tab)
+        identity_range = f"{tab}!A{header_row}:A"
         values = self._client.get_values(self._spreadsheet_id, [identity_range])
-        baseline = _parse_identity_map(values.get(identity_range, []))
+        baseline = _parse_identity_map(
+            values.get(identity_range, []),
+            first_data_row=header_row + 1,
+        )
 
         fresh: list[_PlannedWrite] = []
         stale: list[_PlannedWrite] = []

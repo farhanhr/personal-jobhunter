@@ -1,8 +1,9 @@
 """Tests for the editable workspace table on the canonical tab.
 
 The table is presentation over the canonical rows, so these assertions are about
-the contract: every canonical column is named, only the user-owned columns get a
-picker, the picker never rejects free text, and no request can move data.
+the contract: every canonical column is named, the table starts below the KPI
+strip, every column stays TEXT, and the user-owned pickers are non-strict cell
+validation so they appear on every data row.
 """
 
 from __future__ import annotations
@@ -10,7 +11,10 @@ from __future__ import annotations
 import pytest
 
 from personal_job_finder_api.integrations.google_sheets import workspace_table as table
-from personal_job_finder_api.integrations.google_sheets.config import OPPORTUNITY_HEADERS
+from personal_job_finder_api.integrations.google_sheets.config import (
+    OPPORTUNITY_HEADER_ROW,
+    OPPORTUNITY_HEADERS,
+)
 
 
 def _table(sheet_id: int = 11) -> dict:
@@ -31,7 +35,7 @@ def test_the_table_targets_the_canonical_tab() -> None:
 def test_the_table_starts_at_the_header_row() -> None:
     range_ = _table()["range"]
 
-    assert range_["startRowIndex"] == 0
+    assert range_["startRowIndex"] == OPPORTUNITY_HEADER_ROW - 1
     assert range_["startColumnIndex"] == 0
     assert range_["sheetId"] == 11
 
@@ -39,7 +43,23 @@ def test_the_table_starts_at_the_header_row() -> None:
 def test_the_table_has_room_to_grow() -> None:
     """A table that stopped at today's last row would exclude tomorrow's finds."""
 
-    assert _table()["range"]["endRowIndex"] >= 1_000
+    assert _table()["range"]["endRowIndex"] >= OPPORTUNITY_HEADER_ROW + 1_000
+
+
+def test_the_helper_column_is_appended_only_when_missing() -> None:
+    """The KPI strip's bound needs a column right of the last canonical column."""
+
+    assert table.build_helper_column_request(11, 33) == {
+        "appendDimension": {"sheetId": 11, "dimension": "COLUMNS", "length": 1}
+    }
+    assert table.build_helper_column_request(11, 34) is None
+
+
+def test_the_helper_column_is_hidden() -> None:
+    request = table.build_hide_helper_request(11)["updateDimensionProperties"]
+
+    assert request["range"]["startIndex"] == len(OPPORTUNITY_HEADERS)
+    assert request["properties"]["hiddenByUser"] is True
 
 
 def test_every_canonical_column_is_named_in_order() -> None:
@@ -98,41 +118,61 @@ def test_the_status_dropdown_offers_the_suggested_values() -> None:
     assert len(offered) == 8
 
 
-# ---------------------------------------------------------------- validation
+def test_the_dropdown_never_rejects_free_text() -> None:
+    """ADR-021 keeps ``application_status`` free text with suggested values.
 
-
-def test_the_status_dropdown_is_a_table_column_not_a_cell_rule() -> None:
-    """``setDataValidation`` is rejected on typed columns, so the table owns it.
-
-    Sheets accepts any value in a ``DROPDOWN`` column, which is what ADR-021 needs
-    for free-text ``application_status``.
+    A table column rule carries only ``condition``; ``strict`` is a cell-rule
+    field and is rejected here. A ``DROPDOWN`` column accepts free text anyway.
     """
 
-    assert not hasattr(table, "build_lenient_validation_requests")
+    for name in table.USER_DROPDOWNS:
+        rule = _column(_table()["columnProperties"], name)["dataValidationRule"]
+        assert set(rule) == {"condition"}
+        assert rule["condition"]["type"] == "ONE_OF_LIST"
 
-    rule = _column(_table()["columnProperties"], "application_status")["dataValidationRule"]
-    assert rule["condition"]["type"] == "ONE_OF_LIST"
+
+def test_the_table_is_the_only_validation_surface() -> None:
+    """Google rejects ``setDataValidation`` on any sheet that carries a table.
+
+    Verified live: even a ``TEXT`` column on a row outside the table is refused
+    with "This operation is not allowed on cells in typed columns". The picker
+    must therefore come from the table column, and the table must cover every
+    grid row.
+    """
+
+    assert not hasattr(table, "build_validation_requests")
 
 
-def test_the_dropdown_list_is_the_only_validation_surface() -> None:
-    """No request may install a cell rule that could reject typed text."""
+def test_the_table_covers_every_grid_row() -> None:
+    """A table that stopped at the old grid size left later rows without a picker."""
 
-    for body in (
-        table.build_add_table_request(11),
-        table.build_update_table_request(11, "t1"),
-        table.build_freeze_request(11),
-    ):
-        assert "setDataValidation" not in body
+    assert table.table_bounds(rows=1_004) == (
+        OPPORTUNITY_HEADER_ROW - 1,
+        1_004,
+    )
+
+
+def test_the_table_never_extends_past_a_short_grid() -> None:
+    start, end = table.table_bounds(rows=OPPORTUNITY_HEADER_ROW + 10)
+
+    assert start == OPPORTUNITY_HEADER_ROW - 1
+    assert end == OPPORTUNITY_HEADER_ROW + 10
+
+
+def test_the_table_is_capped_by_its_own_row_budget() -> None:
+    _, end = table.table_bounds(rows=100_000)
+
+    assert end == OPPORTUNITY_HEADER_ROW - 1 + table.TABLE_ROWS
 
 
 # ------------------------------------------------------------------- framing
 
 
-def test_the_header_row_and_identity_columns_are_frozen() -> None:
+def test_the_strip_and_header_are_frozen() -> None:
     properties = table.build_freeze_request(11)["updateSheetProperties"]
 
     grid = properties["properties"]["gridProperties"]
-    assert grid["frozenRowCount"] == 1
+    assert grid["frozenRowCount"] == OPPORTUNITY_HEADER_ROW
     assert grid["frozenColumnCount"] == 3
     assert "gridProperties.frozenRowCount" in properties["fields"]
 

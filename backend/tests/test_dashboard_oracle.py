@@ -12,7 +12,6 @@ from datetime import date
 
 from personal_job_finder_api.integrations.google_sheets import dashboard_layout as layout
 from personal_job_finder_api.integrations.google_sheets import dashboard_oracle as oracle
-from personal_job_finder_api.integrations.google_sheets import workspace_layout as layout_cards
 
 AS_OF = date(2026, 11, 20)
 
@@ -429,71 +428,97 @@ def test_the_oracle_covers_every_metric_cell_the_layout_writes() -> None:
     assert "J1" in computed
 
 
-# ------------------------------------------------------------------- cards
+# --------------------------------------------------------------- KPI strip
 
 
-def _cards(rows, as_of=AS_OF):
-    return oracle.compute_cards(oracle.opportunity_rows(rows), as_of=as_of)
+def _strip(rows, as_of=AS_OF):
+    return oracle.compute_kpi_strip(oracle.opportunity_rows(rows), as_of=as_of)
 
 
-def test_cards_are_all_zero_without_rows() -> None:
-    metrics = _cards([])
+def test_the_strip_is_all_zero_without_rows() -> None:
+    metrics = _strip([])
 
-    for address in oracle.CARD_CELLS:
+    for address in oracle.KPI_STRIP_CELLS:
         assert metrics[address] == 0, address
 
 
-def test_a_blank_status_is_need_to_apply() -> None:
-    metrics = _cards([{"opportunity_id": "opp-1", "application_status": ""}])
+def test_a_blank_status_is_need_to_apply_not_applied() -> None:
+    metrics = _strip([{"opportunity_id": "opp-1", "application_status": ""}])
 
-    assert metrics["B3"] == 1
-    assert metrics["B7"] == 1
+    assert metrics["E2"] == 1
+    assert metrics["A2"] == 0
 
 
 def test_the_literal_need_to_apply_status_counts_too() -> None:
-    metrics = _cards([{"opportunity_id": "opp-1", "application_status": "Need to Apply"}])
+    metrics = _strip([{"opportunity_id": "opp-1", "application_status": "Need to Apply"}])
 
-    assert metrics["B3"] == 1
+    assert metrics["E2"] == 1
+    assert metrics["A2"] == 0
 
 
-def test_need_to_apply_and_blank_are_not_double_counted() -> None:
-    metrics = _cards(
+def test_every_status_past_need_to_apply_is_total_applied() -> None:
+    metrics = _strip(
         [
-            {"opportunity_id": "opp-1", "application_status": ""},
-            {"opportunity_id": "opp-2", "application_status": "Need to Apply"},
+            {"opportunity_id": "opp-1", "application_status": "Applied"},
+            {"opportunity_id": "opp-2", "application_status": "Interview"},
+            {"opportunity_id": "opp-3", "application_status": "Offer"},
+            {"opportunity_id": "opp-4", "application_status": "Rejected"},
+            {"opportunity_id": "opp-5", "application_status": "Ghosted"},
         ]
     )
 
-    assert metrics["B3"] == 2
+    assert metrics["A2"] == 5
+    assert metrics["E2"] == 0
 
 
-def test_an_archived_row_leaves_the_active_pipeline() -> None:
-    metrics = _cards(
+def test_total_applied_and_need_to_apply_partition_the_pipeline() -> None:
+    metrics = _strip(
         [
-            {"opportunity_id": "opp-1", "user_status": "ignored"},
-            {"opportunity_id": "opp-2"},
+            {"opportunity_id": "blank", "application_status": ""},
+            {"opportunity_id": "need", "application_status": "Need to Apply"},
+            {"opportunity_id": "applied", "application_status": "Applied"},
         ]
     )
 
-    assert metrics["B7"] == 1
-    assert metrics["B8"] == 1
+    assert metrics["A2"] + metrics["E2"] == 3
 
 
-def test_an_excluded_row_counts_as_archived() -> None:
-    metrics = _cards([{"opportunity_id": "opp-1", "location_status": "excluded"}])
+def test_an_archived_row_leaves_every_card() -> None:
+    metrics = _strip(
+        [
+            {
+                "opportunity_id": "opp-1",
+                "user_status": "ignored",
+                "application_status": "Applied",
+                "date_applied": "2026-11-20",
+                "interview_date": "2026-11-20",
+            },
+            {"opportunity_id": "opp-2", "application_status": "Applied"},
+        ]
+    )
 
-    assert metrics["B7"] == 0
-    assert metrics["B8"] == 1
+    assert metrics["A2"] == 1
+    assert metrics["E2"] == 0
+    assert metrics["I2"] == 0
+    assert metrics["M2"] == 0
 
 
-def test_an_archived_row_is_never_need_to_apply() -> None:
-    metrics = _cards([{"opportunity_id": "opp-1", "user_status": "ignored"}])
+def test_an_excluded_row_leaves_every_card() -> None:
+    metrics = _strip(
+        [
+            {
+                "opportunity_id": "opp-1",
+                "location_status": "excluded",
+                "application_status": "Applied",
+            }
+        ]
+    )
 
-    assert metrics["B3"] == 0
+    assert metrics["A2"] == 0
 
 
 def test_applied_counts_only_the_last_seven_jakarta_dates() -> None:
-    metrics = _cards(
+    metrics = _strip(
         [
             {"opportunity_id": "in", "date_applied": "2026-11-20"},
             {"opportunity_id": "start", "date_applied": "2026-11-14"},
@@ -502,11 +527,11 @@ def test_applied_counts_only_the_last_seven_jakarta_dates() -> None:
         ]
     )
 
-    assert metrics["B4"] == 2
+    assert metrics["I2"] == 2
 
 
 def test_interviews_look_from_today_to_today_plus_seven() -> None:
-    metrics = _cards(
+    metrics = _strip(
         [
             {"opportunity_id": "today", "interview_date": "2026-11-20"},
             {"opportunity_id": "last", "interview_date": "2026-11-27"},
@@ -515,48 +540,21 @@ def test_interviews_look_from_today_to_today_plus_seven() -> None:
         ]
     )
 
-    assert metrics["B5"] == 2
-
-
-def test_offers_counts_the_offer_status_case_insensitively() -> None:
-    metrics = _cards(
-        [
-            {"opportunity_id": "opp-1", "application_status": "Offer"},
-            {"opportunity_id": "opp-2", "application_status": " offer "},
-            {"opportunity_id": "opp-3", "application_status": "Applied"},
-        ]
-    )
-
-    assert metrics["B6"] == 2
+    assert metrics["M2"] == 2
 
 
 def test_duplicate_ids_count_once_per_card() -> None:
-    metrics = _cards(
+    metrics = _strip(
         [
-            {"opportunity_id": "opp-1", "application_status": "Offer"},
-            {"opportunity_id": "opp-1", "application_status": "Offer"},
+            {"opportunity_id": "opp-1", "application_status": "Applied"},
+            {"opportunity_id": "opp-1", "application_status": "Applied"},
         ]
     )
 
-    assert metrics["B6"] == 1
-    assert metrics["B7"] == 1
+    assert metrics["A2"] == 1
 
 
-def test_the_cards_cover_exactly_the_layout_cells() -> None:
-    assert set(oracle.CARD_CELLS) == set(layout_cards.CARD_CELLS)
+def test_the_strip_covers_exactly_the_layout_cells() -> None:
+    from personal_job_finder_api.integrations.google_sheets import kpi_strip
 
-
-def test_an_archived_row_is_never_new_or_offered() -> None:
-    metrics = _cards(
-        [
-            {
-                "opportunity_id": "opp-1",
-                "user_status": "ignored",
-                "application_status": "Offer",
-                "date_applied": "2026-11-20",
-            }
-        ]
-    )
-
-    assert metrics["B4"] == 0
-    assert metrics["B6"] == 0
+    assert set(oracle.KPI_STRIP_CELLS) == {card.value_address for card in kpi_strip.cards()}

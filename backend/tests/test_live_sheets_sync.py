@@ -49,7 +49,9 @@ from personal_job_finder_api.integrations.google_sheets.client import (
 )
 from personal_job_finder_api.integrations.google_sheets.config import (
     JOB_SOURCE_HEADERS,
+    OPPORTUNITY_FIRST_DATA_ROW,
     OPPORTUNITY_HEADERS,
+    header_row_for,
 )
 from personal_job_finder_api.integrations.google_sheets.service import (
     build_google_sheets_foundation,
@@ -138,7 +140,7 @@ def _sheet_rows(client, spreadsheet_id: str) -> dict[str, list[list[str]]]:
         value_render_option=UNFORMATTED_RENDER_OPTION,
     )
     return {
-        title: [row for row in rows[1:] if any(cell != "" for cell in row)]
+        title: [row for row in rows[header_row_for(title) :] if any(cell != "" for cell in row)]
         for title, rows in values.items()
     }
 
@@ -268,7 +270,11 @@ def test_staging_to_sheet_to_api_round_trip() -> None:
         #    snapshot is internally consistent, then refresh for real.
         live_check.clear_data_rows(client, spreadsheet_id)
         live_check.write_rows(
-            client, spreadsheet_id, "Opportunities", new_opportunities, start_row=2
+            client,
+            spreadsheet_id,
+            "Opportunities",
+            new_opportunities,
+            start_row=OPPORTUNITY_FIRST_DATA_ROW,
         )
         live_check.write_rows(client, spreadsheet_id, "Job_Sources", new_sources, start_row=2)
         result = refresh.refresh(wait_seconds=5.0)
@@ -310,7 +316,9 @@ def test_staging_to_sheet_to_api_round_trip() -> None:
     restored = _sheet_rows(client, spreadsheet_id)
     for title in ("Opportunities", "Job_Sources"):
         before = [
-            row for row in snapshot.tabs.get(title, [])[1:] if any(cell != "" for cell in row)
+            row
+            for row in snapshot.tabs.get(title, [])[header_row_for(title) :]
+            if any(cell != "" for cell in row)
         ]
         assert restored[title] == before, title
     print("restored: both canonical tabs match the captured baseline")
@@ -420,7 +428,11 @@ def test_a_tracker_edit_reaches_the_sheet_and_the_api() -> None:
         ]
         live_check.clear_data_rows(client, spreadsheet_id)
         live_check.write_rows(
-            client, spreadsheet_id, "Opportunities", new_opportunities, start_row=2
+            client,
+            spreadsheet_id,
+            "Opportunities",
+            new_opportunities,
+            start_row=OPPORTUNITY_FIRST_DATA_ROW,
         )
         live_check.write_rows(client, spreadsheet_id, "Job_Sources", new_sources, start_row=2)
 

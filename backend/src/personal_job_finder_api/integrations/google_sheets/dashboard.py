@@ -64,7 +64,7 @@ class MetricsInitService:
         self._client = client
         self._spreadsheet_id = spreadsheet_id
 
-    def initialize(self) -> MetricsInitResult:
+    def initialize(self, *, force: bool = False) -> MetricsInitResult:
         metadata = self._client.get_metadata(self._spreadsheet_id)
         _require_jakarta_timezone(metadata.time_zone)
         metadata = self._adopt_legacy_tab(metadata)
@@ -93,7 +93,7 @@ class MetricsInitService:
                     "Run the command again to finish initialization.",
                 )
         else:
-            existing = self._inspect_existing_tab()
+            existing = None if force else self._inspect_existing_tab()
             if existing is not None:
                 return existing
             dialect = _formula_dialect(metadata.locale)
