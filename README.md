@@ -154,6 +154,18 @@ browser, and the resulting token is kept in your operating system's credential s
    your values. Set `user_status` to `ignored` to archive a row: it leaves the active
    count and the cards stop counting it, but nothing is deleted.
 
+   `sync` runs the repair pass first, so a cleared header or a deleted table is fixed
+   before any projection lands. To run the same repair on its own:
+
+   ```bash
+   uv run python -m personal_job_finder_api.integrations.google_sheets.cli workspace-repair
+   ```
+
+   Repair changes structure only: headers, the native table, and the frozen panes. It
+   never changes a data value and writes nothing when the workbook is already healthy.
+   Add `--force` to reapply the table and frozen panes after deleting only a dropdown;
+   that is the one drift metadata cannot see.
+
    The older 25-metric board is still available as the `Metrics` tab:
 
    ```bash

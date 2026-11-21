@@ -136,6 +136,11 @@ def _run_sync(settings: Settings, arguments: argparse.Namespace) -> int:
             return 0
 
         foundation = build_google_sheets_foundation(settings)
+        # Repair first: a cleared header or a deleted table would otherwise make
+        # every projection in this dispatch land in the wrong place.
+        repair = foundation.repair_workspace()
+        if repair.changed:
+            print(f"Workspace repair: {repair.message()}")
         dispatcher = SyncDispatcher(
             engine,
             transport=foundation.transport,
@@ -181,6 +186,7 @@ def _build_parser() -> argparse.ArgumentParser:
             "dashboard-init",
             "dashboard-verify",
             "metrics-init",
+            "workspace-repair",
             "disconnect",
             "sync",
             "recover",
@@ -192,7 +198,8 @@ def _build_parser() -> argparse.ArgumentParser:
             "dashboard-init: create the optional summary-cards Dashboard tab; "
             "metrics-init: create the optional formula-only Metrics board; "
             "dashboard-verify: read-only check that every summary card and metric "
-            "agrees with the canonical rows; "
+            "agrees with the canonical rows; workspace-repair: reconcile headers, the "
+            "native table, and the frozen panes without changing data; "
             "disconnect: remove the stored Google credential; sync: dispatch due "
             "outbox work; recover: return abandoned in-progress work to the retry "
             "queue; requeue: re-enable one blocked projection after fixing its cause"
@@ -207,6 +214,11 @@ def _build_parser() -> argparse.ArgumentParser:
         "--outbox-id",
         default="",
         help="projection id used by the requeue command",
+    )
+    parser.add_argument(
+        "--force",
+        action="store_true",
+        help="reapply presentation even when the structure already looks healthy",
     )
     return parser
 
@@ -247,6 +259,11 @@ def main(argv: Sequence[str] | None = None) -> int:
 
         if arguments.command == "dashboard-verify":
             return _run_dashboard_verify(settings, foundation)
+
+        if arguments.command == "workspace-repair":
+            outcome = foundation.repair_workspace(force=arguments.force)
+            print(outcome.message())
+            return 0
 
         result = foundation.initialize()
         _print_preflight(result)

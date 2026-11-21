@@ -437,18 +437,25 @@ def build_fixture(*, as_of: date, run_id: str) -> LiveFixture:
         },
     )
 
+    def source(identifier: str, source_type: str, index: int) -> dict[str, str]:
+        return {
+            "source_id": f"{tag}-src-{index}",
+            "opportunity_id": f"{tag}-{identifier}",
+            "source_type": source_type,
+        }
+
     sources = (
-        {"opportunity_id": f"{tag}-applied", "source_type": "greenhouse"},
-        {"opportunity_id": f"{tag}-applied", "source_type": "lever"},
+        source("applied", "greenhouse", 1),
+        source("applied", "lever", 2),
         # A duplicate of one type must not double count.
-        {"opportunity_id": f"{tag}-applied", "source_type": "greenhouse"},
-        {"opportunity_id": f"{tag}-need-to-apply", "source_type": "ashby"},
-        {"opportunity_id": f"{tag}-free-text", "source_type": "permitted_career_page"},
-        {"opportunity_id": f"{tag}-interview", "source_type": "linkedin_post_manual"},
+        source("applied", "greenhouse", 3),
+        source("need-to-apply", "ashby", 4),
+        source("free-text", "permitted_career_page", 5),
+        source("interview", "linkedin_post_manual", 6),
         # Blank type: Unknown, not an orphan.
-        {"opportunity_id": f"{tag}-invalid-date", "source_type": ""},
+        source("invalid-date", "", 7),
         # Orphan source row: its opportunity does not exist, so it counts nowhere.
-        {"opportunity_id": f"{tag}-missing-opportunity", "source_type": "greenhouse"},
+        source("missing-opportunity", "greenhouse", 8),
     )
 
     return LiveFixture(run_id=tag, opportunities=opportunities, sources=sources)
@@ -510,10 +517,12 @@ def build_scenarios(*, as_of: date, run_id: str) -> dict[str, LiveFixture]:
         return record
 
     def src(identifier: str, source_type: str) -> dict[str, str]:
+        # ``source_id`` is the identity column the metric row bound reads, so it
+        # must never be blank: a blank one pins every range to row 2.
         return {
+            "source_id": f"{run_id}-src-{identifier}-{source_type or 'blank'}",
             "opportunity_id": f"{run_id}-{identifier}",
             "source_type": source_type,
-            "source_id": f"{run_id}-src-{identifier}-{source_type or 'blank'}",
         }
 
     scenarios: dict[str, LiveFixture] = {}
@@ -574,7 +583,11 @@ def build_scenarios(*, as_of: date, run_id: str) -> dict[str, LiveFixture]:
         sources=(
             src("blank-type", ""),
             # Orphan: its opportunity does not exist.
-            {"opportunity_id": f"{run_id}-ghost", "source_type": "greenhouse"},
+            {
+                "source_id": f"{run_id}-src-ghost",
+                "opportunity_id": f"{run_id}-ghost",
+                "source_type": "greenhouse",
+            },
         ),
     )
 

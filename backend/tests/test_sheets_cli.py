@@ -172,9 +172,21 @@ def test_sync_reports_counters_without_leaking_configuration(
         batch_size = 25
         max_batch_ranges = 100
 
+    class StubOutcome:
+        changed = False
+
+        @staticmethod
+        def message() -> str:
+            return "Workspace already matches the expected structure."
+
     class StubFoundation:
         config = StubConfig()
         transport = object()
+
+        @staticmethod
+        def repair_workspace(*, force: bool = False) -> StubOutcome:
+            assert force is False
+            return StubOutcome()
 
     class StubDispatcher:
         def __init__(self, engine, **_kwargs) -> None:
@@ -215,9 +227,21 @@ def test_sync_returns_a_nonzero_exit_code_when_work_is_left_blocked(
         batch_size = 25
         max_batch_ranges = 100
 
+    class StubOutcome:
+        changed = False
+
+        @staticmethod
+        def message() -> str:
+            return "Workspace already matches the expected structure."
+
     class StubFoundation:
         config = StubConfig()
         transport = object()
+
+        @staticmethod
+        def repair_workspace(*, force: bool = False) -> StubOutcome:
+            assert force is False
+            return StubOutcome()
 
     class StubDispatcher:
         def __init__(self, engine, **_kwargs) -> None:
@@ -411,9 +435,21 @@ def test_sync_prepares_the_local_schema_before_dispatching(
         batch_size = 25
         max_batch_ranges = 100
 
+    class StubOutcome:
+        changed = False
+
+        @staticmethod
+        def message() -> str:
+            return "Workspace already matches the expected structure."
+
     class StubFoundation:
         config = StubConfig()
         transport = object()
+
+        @staticmethod
+        def repair_workspace(*, force: bool = False) -> StubOutcome:
+            assert force is False
+            return StubOutcome()
 
     class StubDispatcher:
         def __init__(self, engine, **_kwargs) -> None:
@@ -512,3 +548,107 @@ def test_dashboard_init_and_metrics_init_target_different_services(
     assert cli_module.main(["dashboard-init"]) == 0
     assert cli_module.main(["metrics-init"]) == 0
     assert calls == ["workspace", "metrics"]
+
+
+# --------------------------------------------------------------- workspace repair
+
+
+class _RepairOutcome:
+    def __init__(self, *, changed: bool, message: str) -> None:
+        self.changed = changed
+        self._message = message
+
+    def message(self) -> str:
+        return self._message
+
+
+def test_workspace_repair_prints_the_outcome(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    calls: list[bool] = []
+
+    class StubFoundation:
+        @staticmethod
+        def repair_workspace(*, force: bool = False) -> _RepairOutcome:
+            calls.append(force)
+            return _RepairOutcome(changed=True, message="Repaired: created the workspace table")
+
+    monkeypatch.setattr(
+        cli_module, "build_google_sheets_foundation", lambda settings: StubFoundation()
+    )
+
+    exit_code = cli_module.main(["workspace-repair"])
+
+    output = capsys.readouterr()
+    assert exit_code == 0
+    assert "created the workspace table" in output.out
+    assert calls == [False]
+
+
+def test_workspace_repair_passes_force_through(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    calls: list[bool] = []
+
+    class StubFoundation:
+        @staticmethod
+        def repair_workspace(*, force: bool = False) -> _RepairOutcome:
+            calls.append(force)
+            return _RepairOutcome(changed=True, message="Repaired: updated the workspace table")
+
+    monkeypatch.setattr(
+        cli_module, "build_google_sheets_foundation", lambda settings: StubFoundation()
+    )
+
+    assert cli_module.main(["workspace-repair", "--force"]) == 0
+    assert calls == [True]
+
+
+def test_sync_runs_repair_before_dispatch(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """A cleared header would send every projection to the wrong column."""
+
+    from personal_job_finder_api.sync.dispatcher import SyncOutcome
+
+    order: list[str] = []
+
+    class StubConfig:
+        spreadsheet_id = SPREADSHEET_ID
+        batch_size = 25
+        max_batch_ranges = 100
+
+    class StubFoundation:
+        config = StubConfig()
+        transport = object()
+
+        @staticmethod
+        def repair_workspace(*, force: bool = False) -> _RepairOutcome:
+            order.append("repair")
+            return _RepairOutcome(changed=True, message="Repaired: restored the header row")
+
+    class StubDispatcher:
+        def __init__(self, engine, **_kwargs) -> None:
+            pass
+
+        def dispatch_due(self) -> SyncOutcome:
+            order.append("dispatch")
+            return SyncOutcome(synced=0, failed=0, blocked=0, remaining=0)
+
+    class StubEngine:
+        def dispose(self) -> None:
+            pass
+
+    monkeypatch.setattr(
+        cli_module, "build_google_sheets_foundation", lambda settings: StubFoundation()
+    )
+    monkeypatch.setattr(cli_module, "run_migrations", lambda url: None)
+    monkeypatch.setattr(cli_module, "create_database_engine", lambda settings: StubEngine())
+    monkeypatch.setattr(cli_module, "SyncDispatcher", StubDispatcher)
+
+    assert cli_module.main(["sync"]) == 0
+    assert order == ["repair", "dispatch"]
+    assert "Workspace repair: Repaired: restored the header row" in capsys.readouterr().out

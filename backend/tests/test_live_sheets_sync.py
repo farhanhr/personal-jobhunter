@@ -237,9 +237,22 @@ def test_staging_to_sheet_to_api_round_trip() -> None:
         assert written_ids <= set(read_opportunities)
         assert len(read_sources) == 2
 
-        # 5. The canonical refresh validates referential integrity. The captured
-        #    baseline holds Job_Sources rows whose opportunity does not exist, so
-        #    a refresh must refuse rather than publish an inconsistent snapshot.
+        # 5. The canonical refresh validates referential integrity. Write one
+        #    explicit orphan rather than relying on ambient baseline rows: the
+        #    test owns the inconsistency it asserts on, so it passes against an
+        #    empty sheet and against a populated one.
+        orphan = [""] * len(JOB_SOURCE_HEADERS)
+        orphan[JOB_SOURCE_HEADERS.index("source_id")] = f"{snapshot.run_id}-orphan"
+        orphan[JOB_SOURCE_HEADERS.index("opportunity_id")] = f"{snapshot.run_id}-missing"
+        orphan[JOB_SOURCE_HEADERS.index("source_type")] = "greenhouse"
+        existing_sources = _sheet_rows(client, spreadsheet_id)["Job_Sources"]
+        live_check.write_rows(
+            client,
+            spreadsheet_id,
+            "Job_Sources",
+            [orphan],
+            start_row=len(existing_sources) + 2,
+        )
         refresh = SheetsRefreshService(
             engine,
             transport_factory=lambda: transport,

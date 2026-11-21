@@ -470,3 +470,29 @@ def test_polling_never_sleeps_after_the_last_attempt() -> None:
     )
 
     assert len(sleeps) == 2
+
+
+def test_every_fixture_source_row_has_an_identity() -> None:
+    """``source_id`` is the column the metric row bound reads.
+
+    A blank one pins every source range to row 2, so only the first source would
+    ever be counted. This was a live failure, not a theoretical one.
+    """
+
+    fixture = live_check.build_fixture(as_of=AS_OF, run_id="run-1")
+    for record in fixture.sources:
+        assert record.get("source_id"), record
+
+
+def test_every_scenario_source_row_has_an_identity() -> None:
+    scenarios = live_check.build_scenarios(as_of=AS_OF, run_id="run-1")
+    for name, fixture in scenarios.items():
+        for record in fixture.sources:
+            assert record.get("source_id"), f"{name}: {record}"
+
+
+def test_every_scenario_opportunity_row_has_an_identity() -> None:
+    scenarios = live_check.build_scenarios(as_of=AS_OF, run_id="run-1")
+    for name, fixture in scenarios.items():
+        for record in fixture.opportunities:
+            assert record.get("opportunity_id"), f"{name}: {record}"
