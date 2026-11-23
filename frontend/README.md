@@ -12,5 +12,4 @@ npm run dev
 The app runs at <http://127.0.0.1:5173> and proxies `/api` to
 `http://127.0.0.1:8000`.
 
-See the repository root `README.md` and
-`docs/implementation/M0-project-foundation.md` for architecture and test commands.
+See the repository root `README.md` for the full setup and the architecture overview.
