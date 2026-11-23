@@ -91,7 +91,6 @@ PERMANENT_ERROR_CODES = frozenset(
         "schema_mismatch",
         "credentials_missing",
         "credentials_invalid",
-        "oauth_configuration_invalid",
         "spreadsheet_id_missing",
         "spreadsheet_id_invalid",
         "duplicate_identity",

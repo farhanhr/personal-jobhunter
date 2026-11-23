@@ -422,7 +422,7 @@ def test_service_builder_pins_the_official_origin_and_timeout(monkeypatch) -> No
         return object()
 
     monkeypatch.setattr(client_module, "build", fake_build)
-    credentials = FakeUserCredentials()
+    credentials = FakeCredentials()
 
     client_module.build_google_sheets_service(
         credentials=credentials,
@@ -603,13 +603,12 @@ def test_transport_passes_the_render_option_to_the_official_client() -> None:
 # ------------------------------------- service construction: http vs credentials
 
 
-class FakeUserCredentials:
+class FakeCredentials:
     """A credentials double that can never reach the network."""
 
     def __init__(self) -> None:
         self.before_request_calls: list[object] = []
         self.expired = False
-        self.refresh_token = "test-refresh-token"
 
     def before_request(self, request: object, method: str, url: str, headers: object) -> None:
         self.before_request_calls.append((request, method, url, headers))
@@ -618,7 +617,7 @@ class FakeUserCredentials:
 def test_the_service_is_built_with_authorized_http() -> None:
     from google_auth_httplib2 import AuthorizedHttp
 
-    credentials = FakeUserCredentials()
+    credentials = FakeCredentials()
 
     service = client_module.build_google_sheets_service(
         credentials=credentials,
@@ -632,7 +631,7 @@ def test_authorized_http_wraps_the_configured_httplib2_client() -> None:
     from google_auth_httplib2 import AuthorizedHttp
 
     service = client_module.build_google_sheets_service(
-        credentials=FakeUserCredentials(),
+        credentials=FakeCredentials(),
         timeout_seconds=7.5,
     )
     authorized = service._http
@@ -644,7 +643,7 @@ def test_authorized_http_wraps_the_configured_httplib2_client() -> None:
 
 def test_the_underlying_http_timeout_is_preserved() -> None:
     service = client_module.build_google_sheets_service(
-        credentials=FakeUserCredentials(),
+        credentials=FakeCredentials(),
         timeout_seconds=12.25,
     )
 
@@ -652,7 +651,7 @@ def test_the_underlying_http_timeout_is_preserved() -> None:
 
 
 def test_the_google_credentials_are_attached_to_authorized_http() -> None:
-    credentials = FakeUserCredentials()
+    credentials = FakeCredentials()
 
     service = client_module.build_google_sheets_service(
         credentials=credentials,
@@ -673,7 +672,7 @@ def test_build_receives_http_but_never_credentials(monkeypatch) -> None:
     monkeypatch.setattr(client_module, "build", fake_build)
 
     client_module.build_google_sheets_service(
-        credentials=FakeUserCredentials(),
+        credentials=FakeCredentials(),
         timeout_seconds=7.5,
     )
 
@@ -691,7 +690,7 @@ def test_the_official_origin_and_discovery_flags_are_unchanged(monkeypatch) -> N
     monkeypatch.setattr(client_module, "build", fake_build)
 
     client_module.build_google_sheets_service(
-        credentials=FakeUserCredentials(),
+        credentials=FakeCredentials(),
         timeout_seconds=7.5,
     )
 
@@ -708,7 +707,7 @@ def test_the_real_build_accepts_the_constructed_arguments() -> None:
     regression cannot hide behind a fake ``build``. No Google request is made.
     """
 
-    credentials = FakeUserCredentials()
+    credentials = FakeCredentials()
 
     service = client_module.build_google_sheets_service(
         credentials=credentials,

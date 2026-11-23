@@ -2,15 +2,12 @@
 
 from __future__ import annotations
 
-import json
-from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
 
 from personal_job_finder_api.integrations.google_sheets.config import (
     GoogleSheetsConfig,
-    load_oauth_client_config,
 )
 from personal_job_finder_api.integrations.google_sheets.errors import GoogleSheetsError
 
@@ -64,54 +61,3 @@ def test_valid_spreadsheet_id_is_not_exposed_in_repr() -> None:
     assert VALID_SPREADSHEET_ID not in repr(config)
     assert config.timeout_seconds == 10.0
     assert config.max_batch_ranges == 100
-
-
-def test_oauth_client_config_requires_an_installed_desktop_client(tmp_path: Path) -> None:
-    path = tmp_path / "client.json"
-    path.write_text(json.dumps({"web": {"client_id": "example"}}), encoding="utf-8")
-
-    with pytest.raises(GoogleSheetsError) as captured:
-        load_oauth_client_config(path)
-
-    assert captured.value.code == "oauth_configuration_invalid"
-    assert "example" not in str(captured.value)
-
-
-def test_oauth_client_config_reports_missing_file_without_a_path(tmp_path: Path) -> None:
-    path = tmp_path / "missing-client.json"
-
-    with pytest.raises(GoogleSheetsError) as captured:
-        load_oauth_client_config(path)
-
-    assert captured.value.code == "oauth_configuration_invalid"
-    assert str(path) not in str(captured.value)
-
-
-def test_oauth_client_config_accepts_installed_application(tmp_path: Path) -> None:
-    path = tmp_path / "client.json"
-    path.write_text(
-        json.dumps(
-            {
-                "installed": {
-                    "client_id": "example.apps.googleusercontent.com",
-                    "client_secret": "not-a-real-secret",
-                    "redirect_uris": ["http://127.0.0.1"],
-                }
-            }
-        ),
-        encoding="utf-8",
-    )
-
-    config = load_oauth_client_config(path)
-
-    assert config["installed"]["client_id"].endswith(".apps.googleusercontent.com")
-
-
-def test_oauth_client_config_rejects_malformed_json(tmp_path: Path) -> None:
-    path = tmp_path / "client.json"
-    path.write_text("{not-json", encoding="utf-8")
-
-    with pytest.raises(GoogleSheetsError) as captured:
-        load_oauth_client_config(path)
-
-    assert captured.value.code == "oauth_configuration_invalid"

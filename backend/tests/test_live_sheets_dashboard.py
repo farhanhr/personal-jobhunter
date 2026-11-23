@@ -19,9 +19,13 @@ Run it with the scratch configuration, for example::
 
     PJF_LIVE_SHEETS=1 \\
     PJF_LIVE_SHEETS_CONFIRM=<last 6 chars> \\
-    PJF_DATA_DIR=... GOOGLE_KEYRING_SERVICE_NAME=personal-job-finder-scratch \\
+    PJF_DATA_DIR=... \\
     GOOGLE_SHEETS_SPREADSHEET_ID=... \\
     uv run pytest tests/test_live_sheets_dashboard.py -q -s
+
+The Service Account key must already be at
+``.local/credentials/google-service-account.json`` and the scratch spreadsheet
+must be shared with that account as Editor.
 """
 
 from __future__ import annotations

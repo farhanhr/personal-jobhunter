@@ -1,7 +1,9 @@
 """Application settings.
 
-Values that depend on the local machine are resolved here. The real SQLite file
-must stay outside the repository; tests override the data directory explicitly.
+Values that depend on the local machine are resolved here. The SQLite file lives
+in the private data directory; the Google Service Account key has exactly one
+location, ``<repository>/.local/credentials/google-service-account.json``. Both
+are outside Git-tracked paths and are covered by ``.gitignore`` (``.local/``).
 """
 
 from __future__ import annotations
@@ -9,6 +11,9 @@ from __future__ import annotations
 import os
 from dataclasses import dataclass, field
 from pathlib import Path
+
+REPOSITORY_ROOT = Path(__file__).resolve().parents[4]
+SERVICE_ACCOUNT_FILENAME = "google-service-account.json"
 
 
 def _env_text(name: str) -> str | None:
@@ -46,6 +51,20 @@ def default_data_dir() -> Path:
     return Path.home() / ".local" / "share" / "personal-job-finder"
 
 
+def default_local_dir() -> Path:
+    """Canonical credential directory, overridable for isolated verification.
+
+    ADR-028 documents ``PJF_LOCAL_DIR`` as the way to point the credential
+    directory somewhere else. Isolated checks (temporary credential, live E2E
+    harness) must never write to the user's canonical key file.
+    """
+
+    override = os.environ.get("PJF_LOCAL_DIR")
+    if override:
+        return Path(override).expanduser().resolve()
+    return REPOSITORY_ROOT / ".local"
+
+
 @dataclass(frozen=True, slots=True)
 class Settings:
     app_name: str = "Personal Job Finder API"
@@ -55,6 +74,7 @@ class Settings:
     host: str = "127.0.0.1"
     port: int = 8000
     data_dir: Path = field(default_factory=default_data_dir)
+    local_dir: Path = field(default_factory=default_local_dir)
     database_filename: str = "personal-job-finder.sqlite3"
     sqlite_busy_timeout_ms: int = 5_000
     allowed_hosts: tuple[str, ...] = ("127.0.0.1", "localhost", "::1")
@@ -65,8 +85,6 @@ class Settings:
         "http://localhost:8000",
     )
 
-    # Google Sheets configuration is local private state. The spreadsheet ID
-    # and OAuth files are never committed or included in public error output.
     google_sheets_spreadsheet_id: str | None = field(
         default_factory=lambda: _env_text("GOOGLE_SHEETS_SPREADSHEET_ID"),
         repr=False,
@@ -80,53 +98,16 @@ class Settings:
     google_sheets_batch_size: int = field(
         default_factory=lambda: _env_int("GOOGLE_SHEETS_BATCH_SIZE", 25)
     )
-    google_oauth_client_file: Path | None = None
-    google_token_file: Path | None = None
-    google_keyring_service_name: str = field(
-        default_factory=lambda: _env_text("GOOGLE_KEYRING_SERVICE_NAME") or "personal-job-finder"
-    )
-    google_oauth_timeout_seconds: float = field(
-        default_factory=lambda: _env_float("GOOGLE_OAUTH_TIMEOUT_SECONDS", 300.0)
-    )
 
     def __post_init__(self) -> None:
-        object.__setattr__(
-            self,
-            "data_dir",
-            Path(self.data_dir).expanduser().resolve(),
-        )
-        object.__setattr__(
-            self,
-            "google_oauth_client_file",
-            self._resolve_google_path(
-                explicit=self.google_oauth_client_file,
-                environment_variable="GOOGLE_OAUTH_CLIENT_FILE",
-                filename="google-oauth-client.json",
-            ),
-        )
-        object.__setattr__(
-            self,
-            "google_token_file",
-            self._resolve_google_path(
-                explicit=self.google_token_file,
-                environment_variable="GOOGLE_TOKEN_FILE",
-                filename="google-token.json",
-            ),
-        )
+        object.__setattr__(self, "data_dir", Path(self.data_dir).expanduser().resolve())
+        object.__setattr__(self, "local_dir", Path(self.local_dir).expanduser().resolve())
 
-    def _resolve_google_path(
-        self,
-        *,
-        explicit: Path | None,
-        environment_variable: str,
-        filename: str,
-    ) -> Path:
-        if explicit is not None:
-            return Path(explicit).expanduser()
-        override = _env_text(environment_variable)
-        if override:
-            return Path(override).expanduser()
-        return self.data_dir / "credentials" / filename
+    @property
+    def google_service_account_file(self) -> Path:
+        """The one canonical credential location for V1."""
+
+        return self.local_dir / "credentials" / SERVICE_ACCOUNT_FILENAME
 
     @property
     def database_path(self) -> Path:

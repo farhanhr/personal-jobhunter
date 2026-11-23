@@ -1,6 +1,6 @@
 """Local command-line setup for the Google Sheets foundation.
 
-Commands never print credentials, OAuth response bodies, or spreadsheet IDs.
+Commands never print credentials, provider response bodies, or spreadsheet IDs.
 Only the explicitly typed ``init``, ``metrics-init``, ``dashboard-delete``,
 ``workspace-repair``, and ``sync`` commands write to the spreadsheet; ``check``
 stays read-only.
@@ -23,21 +23,20 @@ from personal_job_finder_api.db.migrate import run_migrations
 from personal_job_finder_api.domain.search_policy import JAKARTA_TIMEZONE
 from personal_job_finder_api.integrations.google_sheets.credentials import (
     CredentialStoreError,
-    build_credential_store,
 )
 from personal_job_finder_api.integrations.google_sheets.dashboard_verify import (
     verify_dashboard,
 )
 from personal_job_finder_api.integrations.google_sheets.errors import GoogleSheetsError
-from personal_job_finder_api.integrations.google_sheets.oauth import (
-    build_google_oauth_authorizer,
-)
 from personal_job_finder_api.integrations.google_sheets.preflight import (
     PreflightResult,
 )
 from personal_job_finder_api.integrations.google_sheets.service import (
     GoogleSheetsFoundation,
     build_google_sheets_foundation,
+)
+from personal_job_finder_api.integrations.google_sheets.service_account_store import (
+    delete_service_account_key,
 )
 from personal_job_finder_api.repositories.sync_outbox import (
     STALE_IN_PROGRESS_AFTER,
@@ -176,12 +175,11 @@ def _run_sync(settings: Settings, arguments: argparse.Namespace) -> int:
 def _build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="python -m personal_job_finder_api.integrations.google_sheets.cli",
-        description="Authorize and inspect the local Google Sheets connection.",
+        description="Configure and inspect the local Google Sheets connection.",
     )
     parser.add_argument(
         "command",
         choices=(
-            "auth",
             "check",
             "init",
             "dashboard-delete",
@@ -194,7 +192,7 @@ def _build_parser() -> argparse.ArgumentParser:
             "requeue",
         ),
         help=(
-            "auth: connect a Google account; check: read-only preflight; "
+            "check: read-only preflight; "
             "init: create missing canonical tabs and empty headers; "
             "dashboard-delete: delete the retired summary-cards Dashboard tab when "
             "this project owns it; "
@@ -202,7 +200,7 @@ def _build_parser() -> argparse.ArgumentParser:
             "dashboard-verify: read-only check that the KPI strip and every metric "
             "agree with the canonical rows; workspace-repair: reconcile headers, the "
             "native table, the KPI strip, and the frozen panes without changing data; "
-            "disconnect: remove the stored Google credential; sync: dispatch due "
+            "disconnect: remove the stored Service Account key; sync: dispatch due "
             "outbox work; recover: return abandoned in-progress work to the retry "
             "queue; requeue: re-enable one blocked projection after fixing its cause"
         ),
@@ -230,14 +228,9 @@ def main(argv: Sequence[str] | None = None) -> int:
     settings = Settings()
 
     try:
-        if arguments.command == "auth":
-            build_google_oauth_authorizer(settings).authorize()
-            print("Google Sheets authorization saved.")
-            return 0
-
         if arguments.command == "disconnect":
-            build_credential_store(settings).delete()
-            print("Stored Google Sheets credential removed.")
+            delete_service_account_key(settings)
+            print("Stored Service Account key removed.")
             return 0
 
         if arguments.command in {"sync", "recover", "requeue"}:

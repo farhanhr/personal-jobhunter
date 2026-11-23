@@ -1,17 +1,14 @@
 """Local Google Sheets configuration and the accepted spreadsheet schema.
 
-Spreadsheet IDs, OAuth client files, and token locations are local private
-settings. They are never committed and never included in public errors.
+Spreadsheet IDs are local private settings. They are never committed and never
+included in public errors.
 """
 
 from __future__ import annotations
 
-import json
 import re
 from collections.abc import Mapping
 from dataclasses import dataclass, field
-from pathlib import Path
-from typing import Any
 
 from personal_job_finder_api.core.config import Settings
 from personal_job_finder_api.integrations.google_sheets.errors import GoogleSheetsError
@@ -178,35 +175,3 @@ def _validate_spreadsheet_id(value: str) -> None:
             "spreadsheet_id_invalid",
             "The configured Google Sheets spreadsheet identifier is invalid.",
         )
-
-
-def load_oauth_client_config(path: Path) -> dict[str, Any]:
-    """Read a desktop OAuth client file without exposing its contents."""
-
-    try:
-        raw = path.read_text(encoding="utf-8")
-        config = json.loads(raw)
-    except (OSError, UnicodeDecodeError, json.JSONDecodeError):
-        raise GoogleSheetsError(
-            "oauth_configuration_invalid",
-            "The Google OAuth client configuration could not be read. "
-            "Download a Desktop app client JSON file and set "
-            "GOOGLE_OAUTH_CLIENT_FILE.",
-            reconnect_required=True,
-        ) from None
-
-    installed = config.get("installed") if isinstance(config, dict) else None
-    if (
-        not isinstance(installed, dict)
-        or not isinstance(installed.get("client_id"), str)
-        or not installed["client_id"].strip()
-        or not isinstance(installed.get("client_secret"), str)
-        or not installed["client_secret"].strip()
-    ):
-        raise GoogleSheetsError(
-            "oauth_configuration_invalid",
-            "The Google OAuth client configuration must describe a Desktop app "
-            "client with an installed application section.",
-            reconnect_required=True,
-        )
-    return config

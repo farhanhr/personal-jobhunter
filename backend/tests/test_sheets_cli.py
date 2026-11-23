@@ -133,14 +133,18 @@ def test_disconnect_removes_the_stored_credential(
         def delete(self) -> None:
             deleted.append(True)
 
-    monkeypatch.setattr(cli_module, "build_credential_store", lambda settings: Store())
+    monkeypatch.setattr(
+        cli_module,
+        "delete_service_account_key",
+        lambda settings: deleted.append(True),
+    )
 
     exit_code = cli_module.main(["disconnect"])
 
     output = capsys.readouterr()
     assert exit_code == 0
     assert deleted == [True]
-    assert "removed" in output.out
+    assert "Service Account key removed" in output.out
 
 
 def test_unexpected_failures_print_no_traceback(
@@ -266,32 +270,6 @@ def test_sync_returns_a_nonzero_exit_code_when_work_is_left_blocked(
     exit_code = cli_module.main(["sync"])
 
     assert exit_code == 1
-
-
-def test_auth_failure_returns_a_nonzero_exit_code_without_traceback(
-    monkeypatch: pytest.MonkeyPatch,
-    capsys: pytest.CaptureFixture[str],
-) -> None:
-    class FailingAuthorizer:
-        def authorize(self) -> None:
-            raise GoogleSheetsError(
-                "oauth_state_mismatch",
-                "The Google authorization response did not match this request.",
-                reconnect_required=True,
-            )
-
-    monkeypatch.setattr(
-        cli_module,
-        "build_google_oauth_authorizer",
-        lambda settings: FailingAuthorizer(),
-    )
-
-    exit_code = cli_module.main(["auth"])
-
-    output = capsys.readouterr()
-    assert exit_code == 1
-    assert "oauth_state_mismatch" in output.err
-    assert "Traceback" not in output.err
 
 
 class StubDashboardFoundation:

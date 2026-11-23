@@ -938,7 +938,7 @@ def build_google_sheets_service(
     credentials are composed into the HTTP layer with ``AuthorizedHttp``
     instead. The configured timeout therefore lives on the wrapped
     ``httplib2.Http`` instance, and the service still authenticates with the
-    user's Google OAuth credentials.
+    Service Account credentials.
     """
 
     http = httplib2.Http(timeout=timeout_seconds)

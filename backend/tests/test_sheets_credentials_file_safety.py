@@ -17,7 +17,7 @@ def test_saving_into_an_existing_directory_does_not_change_its_permissions(
     shared.mkdir(mode=0o755)
     shared.chmod(0o755)
 
-    FileCredentialStore(shared / "token.json").save('{"refresh_token":"synthetic"}')
+    FileCredentialStore(shared / "token.json").save('{"client_email":"synthetic@example.test"}')
 
     assert stat.S_IMODE(shared.stat().st_mode) == 0o755
     assert stat.S_IMODE((shared / "token.json").stat().st_mode) == 0o600
