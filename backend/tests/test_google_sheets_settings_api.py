@@ -225,6 +225,47 @@ def test_upload_ignores_the_uploaded_filename_and_stores_one_canonical_credentia
     assert json.loads(key_path.read_text(encoding="utf-8"))["client_email"] == EMAIL
 
 
+def test_upload_with_a_path_like_filename_cannot_escape_the_credentials_directory(
+    client: TestClient, key_path: Path, tmp_path: Path
+) -> None:
+    """A user-controlled filename must never influence the destination path."""
+
+    headers = _bootstrap(client)
+    response = client.put(
+        "/api/v1/integrations/google-sheets/service-account",
+        content=_key_bytes(),
+        headers={
+            **headers,
+            "Content-Type": "application/json",
+            "Content-Disposition": (
+                'attachment; filename="../../../../escaped-credentials.json"'
+            ),
+        },
+    )
+
+    assert response.status_code == 200
+    assert [path.name for path in key_path.parent.iterdir()] == ["google-service-account.json"]
+    assert not (tmp_path / "escaped-credentials.json").exists()
+    assert not (key_path.parent.parent / "escaped-credentials.json").exists()
+
+
+def test_upload_keeps_the_credentials_directory_private(
+    client: TestClient, key_path: Path
+) -> None:
+    """The upload path must keep the directory at 0700 and the file at 0600."""
+
+    headers = _bootstrap(client)
+    response = client.put(
+        "/api/v1/integrations/google-sheets/service-account",
+        content=_key_bytes(),
+        headers={**headers, "Content-Type": "application/json"},
+    )
+
+    assert response.status_code == 200
+    assert stat.S_IMODE(key_path.parent.stat().st_mode) == 0o700
+    assert stat.S_IMODE(key_path.stat().st_mode) == 0o600
+
+
 def test_replacing_the_key_overwrites_the_canonical_file_without_a_second_credential(
     client: TestClient, key_path: Path
 ) -> None:
