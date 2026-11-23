@@ -122,6 +122,7 @@ def test_init_clarifies_that_application_setup_is_still_required(
     assert "job-hunter setup" in output.out
     assert "still required" in output.out
 
+
 def test_missing_credentials_are_reported_with_a_stable_code(
     monkeypatch: pytest.MonkeyPatch,
     capsys: pytest.CaptureFixture[str],

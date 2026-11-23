@@ -56,10 +56,7 @@ def test_upgrade_to_head_and_downgrade_across_both_revisions(tmp_path) -> None:
         )
         with engine.connect() as connection:
             row = connection.execute(
-                sa.text(
-                    "SELECT spreadsheet_id FROM google_sheets_settings "
-                    "WHERE settings_id = 1"
-                )
+                sa.text("SELECT spreadsheet_id FROM google_sheets_settings WHERE settings_id = 1")
             ).first()
         assert row is not None, "the base settings row must survive the 0006 downgrade"
 

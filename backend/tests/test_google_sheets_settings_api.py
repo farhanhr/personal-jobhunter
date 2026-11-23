@@ -237,9 +237,7 @@ def test_upload_with_a_path_like_filename_cannot_escape_the_credentials_director
         headers={
             **headers,
             "Content-Type": "application/json",
-            "Content-Disposition": (
-                'attachment; filename="../../../../escaped-credentials.json"'
-            ),
+            "Content-Disposition": ('attachment; filename="../../../../escaped-credentials.json"'),
         },
     )
 
@@ -249,9 +247,7 @@ def test_upload_with_a_path_like_filename_cannot_escape_the_credentials_director
     assert not (key_path.parent.parent / "escaped-credentials.json").exists()
 
 
-def test_upload_keeps_the_credentials_directory_private(
-    client: TestClient, key_path: Path
-) -> None:
+def test_upload_keeps_the_credentials_directory_private(client: TestClient, key_path: Path) -> None:
     """The upload path must keep the directory at 0700 and the file at 0600."""
 
     headers = _bootstrap(client)

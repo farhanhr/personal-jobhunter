@@ -300,6 +300,7 @@ class _Effective:
         self.spreadsheet_id = spreadsheet_id
         self.source = source
 
+
 def _raise_invalid():
     from personal_job_finder_api.integrations.google_sheets.errors import GoogleSheetsError
 
@@ -307,6 +308,7 @@ def _raise_invalid():
         "spreadsheet_url_invalid",
         "GOOGLE_SHEETS_SPREADSHEET_URL is not a valid Google Sheets URL.",
     )
+
 
 def test_doctor_handles_a_fresh_unmigrated_database(
     settings: Settings,
@@ -324,6 +326,7 @@ def test_doctor_handles_a_fresh_unmigrated_database(
     assert "migrations pending" in output.out
     assert "job-hunter setup" in output.out
     assert "Traceback" not in output.err
+
 
 def test_doctor_reports_an_invalid_environment_spreadsheet_url(
     settings: Settings,
