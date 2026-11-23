@@ -28,6 +28,20 @@ const HEALTH = {
   version: '0.1.0',
 }
 
+const READY_STATUS = {
+  state: 'ready',
+  message: 'Google Sheets is connected and ready.',
+  service_account_email: 'pjf-reader@pjf-test-project.iam.gserviceaccount.com',
+  key_installed: true,
+  spreadsheet_configured: true,
+  spreadsheet_source: 'ui',
+  last_setup_stage: null,
+  workspace_ready: true,
+  onboarding_required: false,
+  configured_via: 'ui',
+  setup_completed_at: '2026-11-22T05:00:00.000000Z',
+}
+
 const SEARCH_POLICY = {
   timezone: 'Asia/Jakarta',
   operational_day: '2026-11-18',
@@ -256,6 +270,10 @@ function createApi(options: ApiOptions = {}) {
 
       if (path === '/api/v1/health' && method === 'GET') {
         return Promise.resolve(mockResponse(HEALTH))
+      }
+
+      if (path === '/api/v1/integrations/google-sheets/status' && method === 'GET') {
+        return Promise.resolve(mockResponse(READY_STATUS))
       }
 
       if (path === '/api/v1/settings/search' && method === 'GET') {

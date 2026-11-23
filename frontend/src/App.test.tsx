@@ -79,6 +79,20 @@ const emptyFeedPayload = {
   total_pages: 0,
 }
 
+const readyStatusPayload = {
+  state: 'ready',
+  message: 'Google Sheets is connected and ready.',
+  service_account_email: 'pjf-reader@pjf-test-project.iam.gserviceaccount.com',
+  key_installed: true,
+  spreadsheet_configured: true,
+  spreadsheet_source: 'ui',
+  last_setup_stage: null,
+  workspace_ready: true,
+  onboarding_required: false,
+  configured_via: 'ui',
+  setup_completed_at: '2026-11-22T05:00:00.000000Z',
+}
+
 function mockResponse(body: unknown, ok = true): Response {
   return {
     ok,
@@ -93,6 +107,9 @@ function mockApiFetch(healthResponse: Response = mockResponse(healthyPayload)) {
 
     if (url === '/api/v1/health') {
       return Promise.resolve(healthResponse)
+    }
+    if (url === '/api/v1/integrations/google-sheets/status') {
+      return Promise.resolve(mockResponse(readyStatusPayload))
     }
     if (url === '/api/v1/settings/search') {
       return Promise.resolve(mockResponse(emptySettingsPayload))
@@ -134,15 +151,60 @@ describe('App', () => {
     vi.restoreAllMocks()
   })
 
-  it('shows a loading state before the health request resolves', () => {
+  it('routes a first-run user from the gated dashboard through onboarding to Settings', async () => {
+    const notReadyStatus = {
+      ...readyStatusPayload,
+      state: 'not_configured',
+      message: 'Upload the Service Account JSON key to begin.',
+      service_account_email: null,
+      key_installed: false,
+      spreadsheet_configured: false,
+      spreadsheet_source: 'none',
+      workspace_ready: false,
+      onboarding_required: true,
+      configured_via: null,
+      setup_completed_at: null,
+    }
+    const user = userEvent.setup()
     vi.stubGlobal(
       'fetch',
-      vi.fn(() => new Promise<Response>(() => undefined)),
+      vi.fn((input: RequestInfo | URL) => {
+        const url = String(input)
+        if (url === '/api/v1/health') {
+          return Promise.resolve(mockResponse(healthyPayload))
+        }
+        if (url === '/api/v1/integrations/google-sheets/status') {
+          return Promise.resolve(mockResponse(notReadyStatus))
+        }
+        return Promise.reject(new Error(`Unexpected fetch request: ${url}`))
+      }),
+    )
+
+    const { container } = renderRoute('/')
+
+    // The gate redirects to onboarding for a not-ready workspace.
+    expect(await screen.findByText('Set up your job workspace')).toBeInTheDocument()
+    expect(container.textContent).not.toContain('Sync status')
+
+    // The onboarding page links to Settings where the actual setup happens.
+    await user.click(screen.getByRole('link', { name: 'Open Settings' }))
+    expect(await screen.findByText('Not configured')).toBeInTheDocument()
+  })
+
+  it('shows a loading state before the health request resolves', async () => {
+    vi.stubGlobal(
+      'fetch',
+      vi.fn((input: RequestInfo | URL) => {
+        if (String(input) === '/api/v1/integrations/google-sheets/status') {
+          return Promise.resolve(mockResponse(readyStatusPayload))
+        }
+        return new Promise<Response>(() => undefined)
+      }),
     )
 
     renderRoute()
 
-    expect(screen.getByText(/checking backend connection/i)).toBeInTheDocument()
+    expect(await screen.findByText(/checking backend connection/i)).toBeInTheDocument()
     expect(screen.queryByText(/backend connected/i)).not.toBeInTheDocument()
   })
 
@@ -177,7 +239,12 @@ describe('App', () => {
   it('shows the unavailable state when the request fails', async () => {
     vi.stubGlobal(
       'fetch',
-      vi.fn().mockRejectedValue(new Error('Network down')),
+      vi.fn((input: RequestInfo | URL) => {
+        if (String(input) === '/api/v1/integrations/google-sheets/status') {
+          return Promise.resolve(mockResponse(readyStatusPayload))
+        }
+        return Promise.reject(new Error('Network down'))
+      }),
     )
 
     renderRoute()
@@ -276,6 +343,9 @@ describe('App', () => {
 
       if (url === '/api/v1/health') {
         return Promise.resolve(mockResponse(healthyPayload))
+      }
+      if (url === '/api/v1/integrations/google-sheets/status') {
+        return Promise.resolve(mockResponse(readyStatusPayload))
       }
       if (url === '/api/v1/settings/search') {
         return Promise.resolve(mockResponse(emptySettingsPayload))

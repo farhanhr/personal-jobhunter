@@ -1,7 +1,9 @@
 import { BrowserRouter, Route, Routes } from 'react-router'
 import { AppShell } from './components/AppShell'
 import { PageHeader } from './components/PageHeader'
+import { WorkspaceGate } from './components/WorkspaceGate'
 import { DashboardPage } from './pages/DashboardPage'
+import { OnboardingPage } from './pages/OnboardingPage'
 import { OpportunityDetailPage } from './pages/OpportunityDetailPage'
 import { OpportunitiesPage } from './pages/OpportunitiesPage'
 import { SettingsPage } from './pages/SettingsPage'
@@ -25,10 +27,13 @@ export function AppRoutes() {
   return (
     <Routes>
       <Route element={<AppShell />}>
-        <Route index element={<DashboardPage />} />
-        <Route path="opportunities" element={<OpportunitiesPage />} />
-        <Route path="opportunities/:opportunityId" element={<OpportunityDetailPage />} />
         <Route path="settings" element={<SettingsPage />} />
+        <Route path="onboarding" element={<OnboardingPage />} />
+        <Route element={<WorkspaceGate />}>
+          <Route index element={<DashboardPage />} />
+          <Route path="opportunities" element={<OpportunitiesPage />} />
+          <Route path="opportunities/:opportunityId" element={<OpportunityDetailPage />} />
+        </Route>
         <Route path="*" element={<NotFoundPage />} />
       </Route>
     </Routes>
