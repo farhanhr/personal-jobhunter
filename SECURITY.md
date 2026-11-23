@@ -21,7 +21,8 @@ respond. Do not post the details themselves in a public issue.
 
 - The application's own code: the local backend, the local interface, and the command
   line tools.
-- Handling of Google sign-in, stored tokens, and spreadsheet access.
+- Handling of the Google Service Account key, local setup authorization, and spreadsheet
+  access.
 - Anything that could expose local data to another process, website, or person.
 - Anything that could make the app act outside the limits it promises, such as
   exceeding the daily search limit, contacting sites it should not, or ignoring a
@@ -33,13 +34,13 @@ respond. Do not post the details themselves in a public issue.
 - Problems in Google, LinkedIn, or company career sites themselves.
 - A machine that is already compromised, or an attacker who can already read your user
   account files.
-- The fact that a "Testing" OAuth app's token expires after seven days. That is expected
-  Google behavior, and the app tells you to sign in again.
+- Google Service Account key rotation performed in Google Cloud Console. Revoke or rotate
+  the key there if it is ever exposed.
 - Issues that require you to publish your own spreadsheet, tokens, or database.
 
 ## Please never include
 
-- Google client secrets, access or refresh tokens, or token files.
+- Google Service Account keys (the JSON file), private keys, or setup tokens.
 - Your spreadsheet ID, real job data, CVs, or application documents.
 - Recruiter names, email addresses, or other personal contact details.
 - Screenshots or logs that contain any of the above.

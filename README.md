@@ -64,8 +64,9 @@ Your spreadsheet is the source of truth. The local copy can always be rebuilt fr
 - A computer running Linux, macOS, or Windows with Python 3.12 and
   [uv](https://docs.astral.sh/uv/) installed.
 - Node.js 20.19+ (or 22.12+) and npm, to run the local interface.
-- A Google account, if you want results written to a spreadsheet. This part is optional
-  until you decide to connect it.
+- A Google Cloud project with the Sheets API and one Service Account key. Google Sheets is
+  required: it is where your opportunities are stored. See
+  [`docs/onboarding/google-cloud.md`](docs/onboarding/google-cloud.md).
 
 No Docker, database server, cloud account, or paid service is required.
 
@@ -89,132 +90,154 @@ npm run dev
 
 Open <http://127.0.0.1:5173>. Your data stays on this machine.
 
-### 2. Describe what you are looking for
+### 2. Connect your Google Sheet (required)
 
-In the dashboard, add one to three target roles and register the company career sources
-you want to follow. A source must be explicitly reviewed and enabled before it can be
-used. You can disable a source at any time.
+The app stores your opportunities in Google Sheets and keeps them in sync. Google Sheets
+is **required** for the first run: until a workspace is connected, the dashboard redirects
+to a short onboarding checklist. Settings and onboarding stay reachable.
 
-### 3. Connect your Google Sheet (optional but recommended)
+The app uses a **Google Service Account** key. It does not ask you to sign in to Google,
+and it never needs your Google password. You do this setup once.
 
-The app never asks for your Google password. It uses Google's own sign-in page in your
-browser, and the resulting token is kept in your operating system's credential store.
+**What you need**
 
-1. In Google Cloud Console, enable the **Google Sheets API**.
-2. Configure an OAuth consent screen. For personal use, **External** with publishing
-   status **Testing** is enough while you are the only test user.
-3. Create an OAuth client of type **Desktop app** and download its JSON file.
-4. Keep that file outside any Git repository, for example at
-   `~/.local/share/personal-job-finder/credentials/google-oauth-client.json`.
-5. Create a spreadsheet, then point the app at it:
+1. A Google Cloud project (any existing project works).
+2. The **Google Sheets API** enabled for that project.
+3. One **Service Account** in that project, with one **JSON key** downloaded.
+4. Your spreadsheet shared with the Service Account email as **Editor**.
 
-   ```bash
-   export GOOGLE_SHEETS_SPREADSHEET_ID='<your-spreadsheet-id>'
-   ```
+No OAuth client, consent screen, redirect URI, or project IAM role is required. The
+step-by-step guide with Google Cloud links is
+[`docs/onboarding/google-cloud.md`](docs/onboarding/google-cloud.md).
 
-6. Authorize the account from `backend/`:
+**Step 1: create the key**
 
-   ```bash
-   uv run python -m personal_job_finder_api.integrations.google_sheets.cli auth
-   ```
+1. In Google Cloud Console, open **IAM & Admin → Service Accounts** and create a service
+   account. Any name is fine.
+2. Open the service account, go to **Keys → Add key → Create new key**, choose **JSON**,
+   and download the file.
 
-7. Check that the spreadsheet matches the expected layout. This command only reads;
-   it never writes:
+Be sure you download a **Service Account** key. A file with an `installed` or `web`
+section is an OAuth client file and is rejected.
 
-   ```bash
-   uv run python -m personal_job_finder_api.integrations.google_sheets.cli check
-   ```
+**Step 2: share the spreadsheet**
 
-   If a canonical tab or header row is missing, create the missing tabs and empty
-   header rows:
+1. Copy the `client_email` shown in the key or in Settings. It ends in
+   `.iam.gserviceaccount.com`.
+2. In Google Sheets, click **Share**, paste that email, set the role to **Editor**, and
+   send.
 
-   ```bash
-   uv run python -m personal_job_finder_api.integrations.google_sheets.cli init
-   ```
+**Step 3: connect the spreadsheet**
 
-   `init` refuses to overwrite a non-empty header row that does not match the expected
-   schema. Fix that case by hand; nothing is rewritten for you.
+Use either path. Both call the same setup service and store the same local state.
 
-8. Build the workspace: a KPI strip plus an editable table.
+- **Settings UI (primary):** open Settings → Google Sheets, enter the local setup token
+  (see below), upload the key, paste the spreadsheet URL, and click **Save & Setup**. The
+  page shows **Ready** with the refreshed row counts, or tells you which step to fix.
+- **Command line:**
 
-   ```bash
-   uv run python -m personal_job_finder_api.integrations.google_sheets.cli sync
-   ```
+  ```bash
+  cd backend
+  uv run job-hunter setup \
+    --key-file ~/Downloads/service-account.json \
+    --spreadsheet-url "https://docs.google.com/spreadsheets/d/…/edit"
+  ```
 
-   `sync` runs the repair pass first, which puts `Opportunities` into its workspace
-   shape: four KPI cards in rows 1-3 (`Total Applied`, `Need to Apply`,
-   `Applied (last 7 days)`, `Interviews (next 7 days)`), the canonical header in row 5,
-   and a native Sheets table below it with banded rows, a frozen header, and a dropdown
-   on `user_status` and `application_status` for every data row. The dropdowns are
-   suggestions, not constraints — `Ghosted` or any other text you type stays exactly as
-   typed. The KPI cards are formulas on this tab; the app has its own dashboard and does
-   not read them.
+  `--key-file` copies the key to the canonical path below (mode `600`).
+  `--spreadsheet-url` validates and adopts that spreadsheet. Without flags, the command
+  uses the saved or `.env` configuration. For a CLI-only setup, you can keep the link in
+  `.env` (`GOOGLE_SHEETS_SPREADSHEET_URL`) and omit `--spreadsheet-url`; the app reads it
+  and never rewrites the file. If you later change that value, run `job-hunter setup`
+  again: the app refuses to use a sheet it has not validated. `uv run job-hunter doctor`
+  prints readiness at any time.
 
-   You work directly in the `Opportunities` table. Add a row by hand with a company and a
-   job title and no `opportunity_id`; the next `sync` gives it a stable identity and keeps
-   your values. Set `user_status` to `ignored` to archive a row: it leaves the active
-   count and the KPI cards stop counting it, but nothing is deleted.
+**The canonical key path**
 
-   A spreadsheet created by an earlier version still has its header in row 1. The repair
-   moves it down once, inserting four rows above it; every value is preserved, and the
-   move never happens a second time. To run the repair on its own:
+```
+.local/credentials/google-service-account.json
+```
 
-   ```bash
-   uv run python -m personal_job_finder_api.integrations.google_sheets.cli workspace-repair
-   ```
+The `.local/` folder is ignored by Git. The application restricts the file to your user
+account (mode `600`). Do not place the key anywhere else, and do not commit it.
 
-   Repair changes structure only: headers, the native table, the KPI strip, the status
-   dropdowns, and the frozen panes. It never changes a data value and writes nothing when
-   the workbook is already healthy. Add `--force` to reapply all of it after deleting a
-   card or a dropdown; that is the one drift metadata cannot see.
+Two ways to provide the key, both landing on the same path with the same permissions:
 
-   The 25-metric board is still available as the optional `Metrics` tab:
+- **Settings UI:** upload the downloaded JSON in Settings → Google Sheets.
+- **Manually:** copy the JSON to `.local/credentials/google-service-account.json` and
+  make sure only your user can read it (`chmod 600`). The app picks it up on the next
+  start; `uv run job-hunter doctor` confirms it was read.
 
-   ```bash
-   uv run python -m personal_job_finder_api.integrations.google_sheets.cli metrics-init
-   uv run python -m personal_job_finder_api.integrations.google_sheets.cli metrics-init --force
-   ```
+Only the **Service Account email** needs Editor access on the spreadsheet. The key file
+itself never leaves your machine.
 
-   `--force` rewrites an existing board, which is what you need after the header moved
-   from row 1. An existing `Dashboard` board from an earlier version is renamed to
-   `Metrics`, never deleted. Every tab here is a companion view, never a source of truth,
-   and none is required.
+`PJF_LOCAL_DIR` relocates the credential directory. It exists so that isolated checks
+and the live E2E harness never touch your real key file; leave it unset for normal use.
 
-   The retired `Dashboard` cards tab is deleted only when this project wrote it:
+**Existing spreadsheets are adopted**
 
-   ```bash
-   uv run python -m personal_job_finder_api.integrations.google_sheets.cli dashboard-delete
-   ```
+- A blank spreadsheet gets the required tabs, headers, KPI strip, and the optional
+  `Metrics` board.
+- A spreadsheet this app used before is adopted: its rows are refreshed into the app and
+  new rows append below them.
+- A spreadsheet with data that is not a Personal JobHunter workspace is refused with
+  `workspace_incompatible`. Nothing is written and the previous workspace stays active.
 
-   It refuses a tab it does not own, so a sheet you built by hand is left alone.
+**The local setup token**
 
-   To check the KPI strip and the Metrics board without changing anything:
+The Settings section is protected so that only you, on this computer, can change Google
+settings. When the server starts, it writes a one-time token to a private file under your
+data directory (`~/.local/share/personal-job-finder/setup/bootstrap-token`, or the path set
+by `PJF_DATA_DIR`). Paste that value into Settings. The token works once, expires after 30
+minutes, and the file is removed after you use it. Restarting the server issues a new token.
 
-   ```bash
-   uv run python -m personal_job_finder_api.integrations.google_sheets.cli dashboard-verify
-   ```
+**Setup stages**
 
-   This reads the strip, the Metrics board, and both canonical tabs, recomputes every
-   number independently, and reports any cell that shows an error, a constant instead of
-   a formula, or a number that disagrees. It exits non-zero on a mismatch. A tab written
-   by an older version of this app is reported as unsupported: delete that tab and re-run
-   its `-init` command.
+If setup stops, the page or CLI says which stage failed:
 
-9. Copy new results into your sheet whenever you want:
+| Stage | Meaning | What to do |
+|---|---|---|
+| credentials | No key, or the file is not a Service Account key | Install the correct JSON key |
+| spreadsheet | The URL is not a Google Sheets link | Paste the full `https://docs.google.com/spreadsheets/d/...` address |
+| access | Google denied access | Share the spreadsheet with the `client_email` as Editor, then retry |
+| workspace | The target is not a Personal JobHunter workspace | Use a blank spreadsheet or one this app created |
+| schema | A tab exists with headers the app does not recognize | Fix that header row by hand; nothing was changed |
 
-   ```bash
-   uv run python -m personal_job_finder_api.integrations.google_sheets.cli sync
-   ```
+Every stage is safe to retry, and a failed setup never replaces the previously active
+spreadsheet.
 
-   Or pull your latest sheet edits back into the dashboard:
+**If access is revoked later**
 
-   ```bash
-   curl -X POST http://127.0.0.1:8000/api/v1/sheets/refresh \
-     -H 'Origin: http://127.0.0.1:5173'
-   ```
+Deleting the key or removing the Service Account from the spreadsheet share does not lock
+the app. Data already synchronized stays readable; only refresh/sync fails, with a stable
+error (`credentials_missing`, `permission_denied`). Restore the key or the share and run
+**Save & Setup** again.
 
-To disconnect later, run `... google_sheets.cli disconnect`, or revoke the app's access
-from your Google account page. Your local copy is not affected.
+**Advanced commands**
+
+The retained developer commands still run from `backend/` with `uv run job-hunter ...`
+(for example `job-hunter doctor`). The Google Sheets maintenance commands below use the same
+configuration:
+
+```bash
+uv run python -m personal_job_finder_api.integrations.google_sheets.cli sync
+uv run python -m personal_job_finder_api.integrations.google_sheets.cli workspace-repair
+uv run python -m personal_job_finder_api.integrations.google_sheets.cli metrics-init
+uv run python -m personal_job_finder_api.integrations.google_sheets.cli dashboard-verify
+```
+
+`sync` copies new results into your sheet, and `workspace-repair` restores the workspace
+layout without changing any data. `metrics-init` creates the optional `Metrics` board.
+`dashboard-verify` checks the KPI strip and the board without writing anything.
+
+To remove the key, use Settings → Disconnect, or run
+`uv run job-hunter` ... with the `disconnect` command of the maintenance CLI. Your spreadsheet
+is not changed.
+
+### 3. Describe what you are looking for
+
+Now that the workspace is ready, add one to three target roles and register the company
+career sources you want to follow. A source must be explicitly reviewed and enabled before
+it can be used. You can disable a source at any time.
 
 ### 4. Run a search
 
@@ -230,19 +253,20 @@ are queued for your sheet and the dashboard shows what was found.
   `.local/`, for example `PJF_DATA_DIR=.local/share/personal-job-finder`. `.local/` and
   every `*.sqlite3` file are ignored by Git, so the data stays on your machine and is
   never committed. Deleting that one directory removes all of it.
-- The Google token is stored in your OS credential store. If none is available, it is
-  written to a private file that only your user account can read.
+- The Google Service Account key is stored only at `.local/credentials/google-service-account.json`
+  (ignored by Git, mode `600`). The app never shows its contents and never sends it anywhere
+  other than Google's Sheets API.
 - Nothing is sent to the project author or any third party. There is no telemetry.
 - Your spreadsheet ID, roles, and search history are yours. They are not part of this
   project and are never published here.
-- Uninstalling is enough to remove everything, aside from the Google Sheet you created
-  and the app authorization you can revoke in your Google account.
+- Uninstalling is enough to remove everything, aside from the Google Sheet you created.
+  To revoke the key, delete it in Google Cloud Console and remove the local file.
 
 ## Good to know
 
-- **Google sign-in may need renewing.** Apps in Google's "Testing" status can expire
-  refresh tokens after seven days. If that happens, run the `auth` command again. This
-  is expected Google behavior, not a bug in this app.
+- **No Google sign-in is used.** Google user sign-in (OAuth) is deferred to a future
+  version. In this version, access comes only from the Service Account key and the
+  spreadsheet you shared with it.
 - **A search is not a guarantee.** A job can close, change, or be filled between the
   search and your application. Always check the original posting.
 - **Only what you enabled is searched.** If a result seems missing, check that the
@@ -262,21 +286,30 @@ are queued for your sheet and the dashboard shows what was found.
 
 ## Current status
 
-The app is usable today: target roles, company sources, manual searches with the daily
-limit and cooldown, an in-app dashboard, an opportunities feed with a detail view, an
-application tracker, Google Sheets sign-in and synchronization, and an optional
-KPI strip and an editable `Opportunities` table in your spreadsheet.
+The app is usable today: mandatory Google Sheets onboarding, target roles, company
+sources, manual searches with the daily limit and cooldown, an in-app dashboard, an
+opportunities feed with a detail view, an application tracker, Google Sheets
+synchronization with a Service Account key, and an optional KPI strip and an editable
+`Opportunities` table in your spreadsheet.
+
+The first run is gated: until a spreadsheet workspace is validated and prepared, the main
+pages redirect to the onboarding checklist. An existing spreadsheet this app used before is
+adopted and continued; an incompatible spreadsheet is refused without any write. If the key
+or the share is revoked later, already-synchronized data stays readable and only
+refresh/sync fails.
 
 Google Sheets support is implemented and covered by mocked tests, plus an opt-in live
 suite that runs a real round-trip against a disposable scratch spreadsheet. The default
 `uv run pytest` never contacts Google; treat your first sync against your own sheet as a
 supervised setup step.
 
-Still in progress: automatic search history in the sheet (there is no `Run_History` tab
-yet) and manual LinkedIn post import. The spreadsheet KPI strip and the optional
-`Metrics` board are companion views only; the app dashboard remains the place for
-operational state such as search limits, sync status, and target-role names. You can edit
-application-tracking fields in the app or in the sheet; the sheet stays canonical.
+Still in progress: automatic spreadsheet creation (the Service Account cannot create one in
+the test project), carrying a full local read model into a blank spreadsheet, automatic
+search history in the sheet (there is no `Run_History` tab yet), and manual LinkedIn post
+import. The spreadsheet KPI strip and the optional `Metrics` board are companion views
+only; the app dashboard remains the place for operational state such as search limits, sync
+status, and target-role names. You can edit application-tracking fields in the app or in the
+sheet; the sheet stays canonical.
 
 ## Reporting a security issue
 
