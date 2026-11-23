@@ -1,0 +1,394 @@
+"""API tests for the Google Sheets setup endpoints.
+
+Uses a temporary data directory and a temporary credential path. The real key under
+``.local/credentials/`` is never read or written.
+"""
+
+from __future__ import annotations
+
+import json
+from datetime import UTC, datetime
+from pathlib import Path
+
+import pytest
+from fastapi.testclient import TestClient
+from sqlalchemy import Engine
+
+from personal_job_finder_api.core.config import Settings
+from personal_job_finder_api.integrations.google_sheets import orchestration
+from personal_job_finder_api.integrations.google_sheets.errors import GoogleSheetsError
+from personal_job_finder_api.main import create_app
+
+NOW = datetime(2026, 11, 21, 12, 0, tzinfo=UTC)
+ORIGIN = "http://127.0.0.1:5173"
+SYNTHETIC_URL = "https://docs.google.com/spreadsheets/d/1SyntheticSheetId0123456789abcdefXYZ/edit"
+FAKE_KEY = "-----BEGIN PRIVATE KEY-----\nfake-not-real\n-----END PRIVATE KEY-----\n"
+EMAIL = "pjf-reader@pjf-test-project.iam.gserviceaccount.com"
+
+
+def _key_bytes() -> bytes:
+    return json.dumps(
+        {
+            "type": "service_account",
+            "project_id": "pjf-test-project",
+            "private_key_id": "k",
+            "private_key": FAKE_KEY,
+            "client_email": EMAIL,
+            "token_uri": "https://oauth2.googleapis.com/token",
+        }
+    ).encode()
+
+
+@pytest.fixture
+def key_path(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
+    path = tmp_path / "local" / "credentials" / "google-service-account.json"
+    monkeypatch.setattr(Settings, "google_service_account_file", property(lambda self: path))
+    return path
+
+
+@pytest.fixture
+def client(engine: Engine, tmp_path: Path, key_path: Path) -> TestClient:
+    app = create_app(
+        app_settings=Settings(data_dir=tmp_path),
+        engine=engine,
+        clock=lambda: NOW,
+    )
+    return TestClient(app, base_url="http://127.0.0.1:8000")
+
+
+def _bootstrap(client: TestClient) -> dict[str, str]:
+    token = client.app.state.setup_sessions.issue_bootstrap(
+        now=NOW, data_dir=client.app.state.settings.data_dir
+    )
+    response = client.post(
+        "/api/v1/integrations/google-sheets/session",
+        json={"token": token},
+        headers={"Origin": ORIGIN},
+    )
+    assert response.status_code == 200, response.text
+    return {"X-PJF-Setup-Token": response.json()["csrf_token"], "Origin": ORIGIN}
+
+
+def test_status_surfaces_an_invalid_environment_spreadsheet_url(
+    client: TestClient,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A malformed `.env` URL is reported as invalid configuration, not a 500."""
+
+    def raise_invalid(_engine, _settings):
+        raise GoogleSheetsError(
+            "spreadsheet_url_invalid",
+            "The configured spreadsheet URL is not a valid Google Sheets URL.",
+        )
+
+    monkeypatch.setattr(
+        "personal_job_finder_api.api.v1.google_sheets_settings.effective_spreadsheet",
+        raise_invalid,
+    )
+
+    response = client.get("/api/v1/integrations/google-sheets/status")
+
+    assert response.status_code == 200, response.text
+    payload = response.json()
+    assert payload["configuration_error"] == "spreadsheet_url_invalid"
+    assert payload["spreadsheet_configured"] is False
+    assert payload["workspace_ready"] is False
+
+
+def test_status_starts_not_configured_and_never_leaks_key_text(client: TestClient) -> None:
+    response = client.get("/api/v1/integrations/google-sheets/status")
+
+    assert response.status_code == 200
+    assert response.json()["state"] == "not_configured"
+    assert "PRIVATE KEY" not in response.text
+
+
+def test_mutation_without_session_is_rejected(client: TestClient) -> None:
+    response = client.post(
+        "/api/v1/integrations/google-sheets/setup",
+        json={"spreadsheet_url": SYNTHETIC_URL},
+        headers={"Origin": ORIGIN},
+    )
+
+    assert response.status_code == 401
+    assert response.json()["error"]["code"] == "setup_session_required"
+
+
+def test_bootstrap_token_is_single_use(client: TestClient) -> None:
+    token = client.app.state.setup_sessions.issue_bootstrap(
+        now=NOW, data_dir=client.app.state.settings.data_dir
+    )
+    first = client.post(
+        "/api/v1/integrations/google-sheets/session",
+        json={"token": token},
+        headers={"Origin": ORIGIN},
+    )
+    second = client.post(
+        "/api/v1/integrations/google-sheets/session",
+        json={"token": token},
+        headers={"Origin": ORIGIN},
+    )
+
+    assert first.status_code == 200
+    assert second.status_code == 401
+
+
+def test_mutation_with_wrong_origin_is_rejected(client: TestClient) -> None:
+    headers = _bootstrap(client)
+    response = client.post(
+        "/api/v1/integrations/google-sheets/setup",
+        json={"spreadsheet_url": SYNTHETIC_URL},
+        headers={**headers, "Origin": "https://evil.test"},
+    )
+
+    assert response.status_code == 403
+
+
+def test_upload_rejects_non_json_content_type(client: TestClient) -> None:
+    headers = _bootstrap(client)
+    response = client.put(
+        "/api/v1/integrations/google-sheets/service-account",
+        content=_key_bytes(),
+        headers={**headers, "Content-Type": "text/plain"},
+    )
+
+    assert response.status_code == 415
+
+
+def test_upload_rejects_oversized_body(client: TestClient) -> None:
+    headers = _bootstrap(client)
+    response = client.put(
+        "/api/v1/integrations/google-sheets/service-account",
+        content=b" " * (64 * 1024 + 1),
+        headers={**headers, "Content-Type": "application/json"},
+    )
+
+    assert response.status_code == 413
+
+
+def test_upload_stores_key_and_response_has_only_public_fields(
+    client: TestClient, key_path: Path
+) -> None:
+    headers = _bootstrap(client)
+    response = client.put(
+        "/api/v1/integrations/google-sheets/service-account",
+        content=_key_bytes(),
+        headers={**headers, "Content-Type": "application/json"},
+    )
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["service_account_email"] == EMAIL
+    assert body["key_installed"] is True
+    assert "PRIVATE KEY" not in response.text
+    assert key_path.exists()
+
+
+def test_oauth_client_upload_is_rejected_with_actionable_error(client: TestClient) -> None:
+    headers = _bootstrap(client)
+    oauth = json.dumps({"installed": {"client_id": "x", "client_secret": "y"}}).encode()
+    response = client.put(
+        "/api/v1/integrations/google-sheets/service-account",
+        content=oauth,
+        headers={**headers, "Content-Type": "application/json"},
+    )
+
+    assert response.status_code == 422
+    assert response.json()["error"]["code"] == "oauth_client_rejected"
+
+
+def test_spreadsheet_url_is_validated_and_not_echoed(client: TestClient) -> None:
+    headers = _bootstrap(client)
+    client.put(
+        "/api/v1/integrations/google-sheets/service-account",
+        content=_key_bytes(),
+        headers={**headers, "Content-Type": "application/json"},
+    )
+    response = client.post(
+        "/api/v1/integrations/google-sheets/setup",
+        json={"spreadsheet_url": "https://evil.test/x"},
+        headers=headers,
+    )
+
+    assert response.status_code == 422
+    assert response.json()["error"]["code"] == "spreadsheet_url_invalid"
+    assert "evil.test" not in response.text
+
+
+def test_removed_spreadsheet_put_endpoint_is_gone(client: TestClient) -> None:
+    headers = _bootstrap(client)
+    response = client.put(
+        "/api/v1/integrations/google-sheets/spreadsheet",
+        json={"spreadsheet_url": SYNTHETIC_URL},
+        headers=headers,
+    )
+
+    assert response.status_code in {404, 405}
+
+
+def test_status_reports_onboarding_until_setup_completes(
+    client: TestClient, key_path: Path
+) -> None:
+    headers = _bootstrap(client)
+    before = client.get("/api/v1/integrations/google-sheets/status").json()
+    assert before["workspace_ready"] is False
+    assert before["onboarding_required"] is True
+
+    client.put(
+        "/api/v1/integrations/google-sheets/service-account",
+        content=_key_bytes(),
+        headers={**headers, "Content-Type": "application/json"},
+    )
+    after_key = client.get("/api/v1/integrations/google-sheets/status").json()
+    assert after_key["workspace_ready"] is False
+    assert after_key["onboarding_required"] is True
+
+
+def test_status_stays_ready_when_the_key_is_removed(
+    client: TestClient, engine: Engine, key_path: Path
+) -> None:
+    from personal_job_finder_api.integrations.google_sheets.settings_store import (
+        GoogleSheetsSettingsStore,
+    )
+
+    GoogleSheetsSettingsStore(engine).save_spreadsheet_id(
+        "1SyntheticSheetId0123456789abcdefXYZ",
+        workspace_ready_at=NOW,
+        configured_via="ui",
+    )
+
+    body = client.get("/api/v1/integrations/google-sheets/status").json()
+
+    assert body["state"] == "ready"
+    assert body["workspace_ready"] is True
+    assert body["onboarding_required"] is False
+    assert body["key_installed"] is False
+    assert body["configured_via"] == "ui"
+    assert body["setup_completed_at"] is not None
+
+
+def test_save_and_setup_reports_missing_key_without_traceback(client: TestClient) -> None:
+    headers = _bootstrap(client)
+    response = client.post("/api/v1/integrations/google-sheets/setup", headers=headers)
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["ready"] is False
+    assert body["stage"] == "credentials"
+    assert "Traceback" not in response.text
+
+
+def test_save_and_setup_calls_shared_orchestration(
+    client: TestClient, key_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    headers = _bootstrap(client)
+    client.put(
+        "/api/v1/integrations/google-sheets/service-account",
+        content=_key_bytes(),
+        headers={**headers, "Content-Type": "application/json"},
+    )
+    seen: list[str | None] = []
+
+    def fake_setup(settings, engine, **kwargs):
+        seen.append(kwargs.get("spreadsheet_input"))
+        return orchestration.SetupResult(
+            ready=False,
+            stage="access",
+            code="permission_denied",
+            message="Share with the Service Account.",
+            service_account_email=EMAIL,
+        )
+
+    monkeypatch.setattr(
+        "personal_job_finder_api.api.v1.google_sheets_settings.run_setup", fake_setup
+    )
+    response = client.post(
+        "/api/v1/integrations/google-sheets/setup",
+        json={"spreadsheet_url": SYNTHETIC_URL},
+        headers=headers,
+    )
+
+    assert seen == [SYNTHETIC_URL]
+    assert response.json()["stage"] == "access"
+    assert response.json()["service_account_email"] == EMAIL
+
+
+def test_save_and_setup_accepts_no_body(
+    client: TestClient, key_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    headers = _bootstrap(client)
+    client.put(
+        "/api/v1/integrations/google-sheets/service-account",
+        content=_key_bytes(),
+        headers={**headers, "Content-Type": "application/json"},
+    )
+    seen: list[str | None] = []
+
+    def fake_setup(settings, engine, **kwargs):
+        seen.append(kwargs.get("spreadsheet_input"))
+        return orchestration.SetupResult(
+            ready=True,
+            stage=None,
+            code="ready",
+            message="Google Sheets is connected and ready.",
+            workspace_ready=True,
+        )
+
+    monkeypatch.setattr(
+        "personal_job_finder_api.api.v1.google_sheets_settings.run_setup", fake_setup
+    )
+    response = client.post("/api/v1/integrations/google-sheets/setup", headers=headers)
+
+    assert seen == [None]
+    assert response.json()["workspace_ready"] is True
+
+
+def test_incompatible_workspace_returns_conflict(
+    client: TestClient, key_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    headers = _bootstrap(client)
+    client.put(
+        "/api/v1/integrations/google-sheets/service-account",
+        content=_key_bytes(),
+        headers={**headers, "Content-Type": "application/json"},
+    )
+
+    def fake_setup(settings, engine, **kwargs):
+        return orchestration.SetupResult(
+            ready=False,
+            stage="workspace",
+            code="workspace_incompatible",
+            message="This spreadsheet is not a workspace.",
+            preserved="Nothing was changed in the spreadsheet or the active configuration.",
+        )
+
+    monkeypatch.setattr(
+        "personal_job_finder_api.api.v1.google_sheets_settings.run_setup", fake_setup
+    )
+    response = client.post(
+        "/api/v1/integrations/google-sheets/setup",
+        json={"spreadsheet_url": SYNTHETIC_URL},
+        headers=headers,
+    )
+
+    assert response.status_code == 409
+    assert response.json()["error"]["code"] == "workspace_incompatible"
+
+
+def test_disconnect_removes_the_key(client: TestClient, key_path: Path) -> None:
+    headers = _bootstrap(client)
+    client.put(
+        "/api/v1/integrations/google-sheets/service-account",
+        content=_key_bytes(),
+        headers={**headers, "Content-Type": "application/json"},
+    )
+
+    response = client.delete("/api/v1/integrations/google-sheets/service-account", headers=headers)
+
+    assert response.status_code == 200
+    assert response.json()["key_installed"] is False
+    assert not key_path.exists()
+
+
+def test_sanitized_error_type_is_exported() -> None:
+    assert issubclass(GoogleSheetsError, Exception)
