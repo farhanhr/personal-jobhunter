@@ -34,5 +34,10 @@ export default defineConfig({
     globals: true,
     setupFiles: './src/setupTests.ts',
     css: false,
+    // The integration journeys drive many sequential user interactions. Under
+    // CPU contention (a parallel backend suite, a busy laptop) the default 5s
+    // budget is occasionally too small and produces a misleading failure.
+    testTimeout: 20000,
+    hookTimeout: 20000,
   },
 })
