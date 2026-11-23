@@ -47,7 +47,7 @@ def test_migration_revision_follows_the_existing_chain(database_url: str) -> Non
     finally:
         engine.dispose()
 
-    assert revision == "0004_read_model"
+    assert revision == "0006_google_sheets_workspace_state"
 
 
 def test_read_model_tables_exist_only_after_the_new_revision(database_url: str) -> None:
