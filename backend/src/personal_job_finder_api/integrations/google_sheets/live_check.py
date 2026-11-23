@@ -817,19 +817,6 @@ def _row_round_trip(
 # ---------------------------------------------------------------- comparison
 
 
-@dataclass(frozen=True, slots=True)
-class LiveResult:
-    """The outcome of one live comparison."""
-
-    report: verify.VerifyReport
-    attempts: int
-    stable: bool
-
-    @property
-    def ok(self) -> bool:
-        return self.report.ok and self.stable
-
-
 def wait_until_settled(
     read: Callable[[], tuple[verify.MetricCheck, ...]],
     *,

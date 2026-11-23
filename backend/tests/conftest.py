@@ -18,12 +18,19 @@ from personal_job_finder_api.db.tables import companies, target_roles
 
 
 @pytest.fixture(autouse=True)
-def block_external_network(monkeypatch: pytest.MonkeyPatch) -> None:
+def block_external_network(monkeypatch: pytest.MonkeyPatch, request: pytest.FixtureRequest):
     """Fail loudly if a test tries to open a real network connection.
 
     FastAPI's ``TestClient`` runs the app in-process over ASGI, so it does not
     need sockets. Connectors must always receive an injected fake transport.
+
+    The live E2E harness is the one exception: it is explicitly marked and
+    reaches the real Google Sheets API. It opts out by requesting the
+    ``network`` fixture.
     """
+
+    if "network" in request.fixturenames:
+        return
 
     def _blocked(*_args: object, **_kwargs: object) -> None:
         raise AssertionError(
@@ -33,6 +40,12 @@ def block_external_network(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(socket.socket, "connect", _blocked)
     monkeypatch.setattr(socket.socket, "connect_ex", _blocked)
     monkeypatch.setattr(socket, "create_connection", _blocked)
+
+
+@pytest.fixture
+def network() -> None:
+    """Allow real network access for tests that explicitly ask for it."""
+    return None
 
 
 @pytest.fixture
