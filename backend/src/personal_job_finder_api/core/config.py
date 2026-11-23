@@ -16,6 +16,27 @@ REPOSITORY_ROOT = Path(__file__).resolve().parents[4]
 SERVICE_ACCOUNT_FILENAME = "google-service-account.json"
 
 
+def _load_dotenv(path: Path) -> None:
+    """Load ``KEY=value`` lines from ``.env`` without overriding real environment."""
+
+    try:
+        lines = path.read_text(encoding="utf-8").splitlines()
+    except OSError:
+        return
+    for raw in lines:
+        line = raw.strip()
+        if not line or line.startswith("#") or "=" not in line:
+            continue
+        name, _, value = line.partition("=")
+        name = name.strip()
+        value = value.strip().strip('"').strip("'")
+        if name and name not in os.environ:
+            os.environ[name] = value
+
+
+_load_dotenv(REPOSITORY_ROOT / ".env")
+
+
 def _env_text(name: str) -> str | None:
     value = os.environ.get(name)
     if value is None:
@@ -85,6 +106,12 @@ class Settings:
         "http://localhost:8000",
     )
 
+    # Spreadsheet identity is private local state; it is never echoed in errors.
+    # The URL is the user-facing input; the bare ID is accepted as an alias.
+    google_sheets_spreadsheet_url: str | None = field(
+        default_factory=lambda: _env_text("GOOGLE_SHEETS_SPREADSHEET_URL"),
+        repr=False,
+    )
     google_sheets_spreadsheet_id: str | None = field(
         default_factory=lambda: _env_text("GOOGLE_SHEETS_SPREADSHEET_ID"),
         repr=False,

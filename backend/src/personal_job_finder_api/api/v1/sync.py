@@ -17,6 +17,9 @@ from pydantic import BaseModel
 
 from personal_job_finder_api.api.errors import ApiError
 from personal_job_finder_api.api.security import validate_local_request
+from personal_job_finder_api.integrations.google_sheets.settings_store import (
+    effective_spreadsheet_id_or_none,
+)
 from personal_job_finder_api.sync.dispatcher import SyncAlreadyRunning
 from personal_job_finder_api.sync.service import (
     SyncConfigurationError,
@@ -85,7 +88,7 @@ def get_dispatch_service(request: Request) -> SyncDispatchService:
     def spreadsheet_id() -> str:
         return resolve_spreadsheet_id(
             spreadsheet_id=state.sync_spreadsheet_id,
-            fallback=lambda: state.settings.google_sheets_spreadsheet_id,
+            fallback=lambda: effective_spreadsheet_id_or_none(state.engine, state.settings),
         )
 
     return SyncDispatchService(

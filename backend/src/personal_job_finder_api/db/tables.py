@@ -292,6 +292,18 @@ REFRESH_OUTCOME_VALUES = ("succeeded", "failed")
 READ_MODEL_STATE_ID = "google_sheets"
 
 
+google_sheets_settings = sa.Table(
+    "google_sheets_settings",
+    metadata,
+    sa.Column("settings_id", sa.Integer, primary_key=True),
+    sa.Column("spreadsheet_id", sa.String(200), nullable=False),
+    sa.Column("workspace_ready_at_utc", sa.String(32), nullable=True),
+    sa.Column("configured_via", sa.String(16), nullable=True),
+    sa.Column("updated_at_utc", sa.String(32), nullable=False),
+    sa.CheckConstraint("settings_id = 1", name="ck_google_sheets_settings_singleton"),
+)
+
+
 def _enum_check(column: str, values: tuple[str, ...]) -> str:
     """Build a NULL-tolerant CHECK so an absent value stays absent."""
 

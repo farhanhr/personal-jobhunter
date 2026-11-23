@@ -63,6 +63,15 @@ def test_google_settings_read_environment_overrides(monkeypatch, tmp_path: Path)
     assert settings.google_sheets_max_batch_ranges == 25
 
 
+def test_spreadsheet_url_environment_variable_is_read(monkeypatch, tmp_path: Path) -> None:
+    url = "https://docs.google.com/spreadsheets/d/test_spreadsheet_id_1234567890/edit"
+    monkeypatch.setenv("GOOGLE_SHEETS_SPREADSHEET_URL", url)
+
+    settings = Settings(data_dir=tmp_path)
+
+    assert settings.google_sheets_spreadsheet_url == url
+
+
 @pytest.mark.parametrize(
     "removed",
     [

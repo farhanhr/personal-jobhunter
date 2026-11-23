@@ -18,6 +18,9 @@ from personal_job_finder_api.domain.search_policy import (
     BlockingReason,
     SearchPolicyDecision,
 )
+from personal_job_finder_api.integrations.google_sheets.settings_store import (
+    effective_spreadsheet_id_or_none,
+)
 from personal_job_finder_api.search.reservation import (
     IdempotencyKeyConflict,
     InvalidIdempotencyKey,
@@ -77,7 +80,7 @@ def get_search_run_service(request: Request) -> SearchRunService:
         def spreadsheet_id() -> str:
             return resolve_spreadsheet_id(
                 spreadsheet_id=state.sync_spreadsheet_id,
-                fallback=lambda: state.settings.google_sheets_spreadsheet_id,
+                fallback=lambda: effective_spreadsheet_id_or_none(state.engine, state.settings),
             )
 
         SheetsRefreshService(
