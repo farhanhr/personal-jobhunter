@@ -285,33 +285,6 @@ are queued for your sheet and the dashboard shows what was found.
   optional `Metrics` board. `in_ID` is the legacy Google identifier for the same Indonesian
   locale as `id_ID`. Other locales are refused rather than producing broken cells.
 
-## Current status
-
-The app is usable today: mandatory Google Sheets onboarding, target roles, company
-sources, manual searches with the daily limit and cooldown, an in-app dashboard, an
-opportunities feed with a detail view, an application tracker, Google Sheets
-synchronization with a Service Account key, and an optional KPI strip and an editable
-`Opportunities` table in your spreadsheet.
-
-The first run is gated: until a spreadsheet workspace is validated and prepared, the main
-pages redirect to the onboarding checklist. An existing spreadsheet this app used before is
-adopted and continued; an incompatible spreadsheet is refused without any write. If the key
-or the share is revoked later, already-synchronized data stays readable and only
-refresh/sync fails.
-
-Google Sheets support is implemented and covered by mocked tests, plus an opt-in live suite
-that runs a real round-trip against a disposable scratch spreadsheet. The default
-`uv run pytest` never contacts Google; treat your first sync against your own sheet as a
-supervised setup step.
-
-Still in progress: automatic spreadsheet creation (the Service Account cannot create one in
-the test project), carrying a full local read model into a blank spreadsheet, automatic
-search history in the sheet (there is no `Run_History` tab yet), and manual LinkedIn post
-import. The spreadsheet KPI strip and the optional `Metrics` board are companion views
-only; the app dashboard remains the place for operational state such as search limits, sync
-status, and target-role names. You can edit application-tracking fields in the app or in
-the sheet; the sheet stays canonical.
-
 ## Reporting a security issue
 
 Please do not open a public issue that contains personal data or credentials. See
