@@ -40,12 +40,6 @@ const dayMonthFormatter = new Intl.DateTimeFormat('en-GB', {
   month: 'short',
 })
 
-const monthYearFormatter = new Intl.DateTimeFormat('en-GB', {
-  timeZone: 'UTC',
-  month: 'short',
-  year: 'numeric',
-})
-
 /** An absolute instant, rendered in Jakarta time. */
 export function formatJakartaInstant(value: string): string {
   const parsed = new Date(value)
@@ -87,16 +81,6 @@ export function formatDateWindow(start: string, end: string): string {
   }
 
   return `${dateFormatter.format(startDate)} – ${dateFormatter.format(endDate)}`
-}
-
-/** A single calendar date reduced to its month and year. */
-export function formatMonthYear(value: string): string {
-  const parsed = calendarDate(value)
-  if (parsed === null) {
-    return value
-  }
-
-  return monthYearFormatter.format(parsed)
 }
 
 function calendarDate(value: string): Date | null {
