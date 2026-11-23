@@ -40,14 +40,15 @@ def translate_http_status(
     if status == 401:
         return GoogleSheetsError(
             "reconnect_required",
-            "Google authorization is no longer valid. Reconnect the account.",
+            "The Service Account key was rejected. Replace the key in Settings, "
+            "or share the spreadsheet with the Service Account email as Editor.",
             reconnect_required=True,
         )
     if status == 403:
         return GoogleSheetsError(
             "permission_denied",
-            "Google denied access to the spreadsheet. Check the account, scope, "
-            "and sharing permissions, then reconnect if needed.",
+            "Google denied access to the spreadsheet. Share it with the Service "
+            "Account email as Editor, then run setup again.",
             reconnect_required=True,
         )
     if status == 404:
@@ -85,7 +86,8 @@ def translate_transport_exception(exc: BaseException) -> GoogleSheetsError:
     if isinstance(exc, RefreshError):
         return GoogleSheetsError(
             "reconnect_required",
-            "Google authorization is no longer valid. Reconnect the account.",
+            "The Service Account key was rejected. Replace the key in Settings, "
+            "or share the spreadsheet with the Service Account email as Editor.",
             reconnect_required=True,
         )
     if isinstance(exc, (TimeoutError, socket.timeout, GoogleAuthTimeoutError)):
