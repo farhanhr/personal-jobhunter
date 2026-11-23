@@ -69,6 +69,18 @@ def test_save_replaces_existing_key_without_leftovers(settings: Settings) -> Non
     assert names == ["google-service-account.json"]
 
 
+def test_saving_creates_the_credentials_directory_with_private_permissions(
+    settings: Settings,
+) -> None:
+    directory = settings.google_service_account_file.parent
+    assert not directory.exists()
+
+    save_service_account_key(settings, _key())
+
+    assert stat.S_IMODE(directory.stat().st_mode) == 0o700
+    assert stat.S_IMODE(settings.google_service_account_file.stat().st_mode) == 0o600
+
+
 def test_symlinked_credential_file_is_refused(settings: Settings, tmp_path: Path) -> None:
     target = tmp_path / "elsewhere.json"
     target.write_text("{}", encoding="utf-8")

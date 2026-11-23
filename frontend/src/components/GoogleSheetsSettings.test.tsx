@@ -136,6 +136,35 @@ describe('GoogleSheetsSettings', () => {
     expect((init.headers as Record<string, string>)['X-PJF-Setup-Token']).toBe('csrf-synthetic')
   })
 
+  it('uploads a key downloaded with the original Google Cloud filename', async () => {
+    const fetchMock = routes({
+      'PUT /api/v1/integrations/google-sheets/service-account': () => json(awaiting),
+    })
+    vi.stubGlobal('fetch', fetchMock)
+    const user = userEvent.setup()
+
+    renderSettings()
+    await unlock(user)
+
+    const file = new File([SYNTHETIC_KEY], 'example-project-000000-abcdef0123.json', {
+      type: 'application/json',
+    })
+    await user.upload(screen.getByLabelText('Service Account JSON key'), file)
+    await user.click(screen.getByRole('button', { name: 'Upload key' }))
+
+    await waitFor(() =>
+      expect(screen.getByTestId('service-account-email')).toHaveTextContent(SYNTHETIC_EMAIL),
+    )
+    const upload = fetchMock.mock.calls.find(
+      ([input]) => String(input).endsWith('/service-account'),
+    )
+    const init = upload?.[1] as RequestInit
+    // The downloaded name never leaves the browser: the key itself is the body.
+    expect(init.body).toBe(file)
+    expect((init.headers as Record<string, string>)['Content-Disposition']).toBeUndefined()
+    expect((init.headers as Record<string, string>)['Content-Type']).toBe('application/json')
+  })
+
   it('never stores or renders the private key in the DOM or browser storage', async () => {
     vi.stubGlobal(
       'fetch',

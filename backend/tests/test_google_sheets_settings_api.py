@@ -7,6 +7,7 @@ Uses a temporary data directory and a temporary credential path. The real key un
 from __future__ import annotations
 
 import json
+import stat
 from datetime import UTC, datetime
 from pathlib import Path
 
@@ -26,17 +27,20 @@ FAKE_KEY = "-----BEGIN PRIVATE KEY-----\nfake-not-real\n-----END PRIVATE KEY----
 EMAIL = "pjf-reader@pjf-test-project.iam.gserviceaccount.com"
 
 
-def _key_bytes() -> bytes:
+def _key_bytes(email: str = EMAIL) -> bytes:
     return json.dumps(
         {
             "type": "service_account",
             "project_id": "pjf-test-project",
             "private_key_id": "k",
             "private_key": FAKE_KEY,
-            "client_email": EMAIL,
+            "client_email": email,
             "token_uri": "https://oauth2.googleapis.com/token",
         }
     ).encode()
+
+
+OTHER_EMAIL = "pjf-writer@pjf-test-project.iam.gserviceaccount.com"
 
 
 @pytest.fixture
@@ -195,6 +199,97 @@ def test_oauth_client_upload_is_rejected_with_actionable_error(client: TestClien
 
     assert response.status_code == 422
     assert response.json()["error"]["code"] == "oauth_client_rejected"
+
+
+def test_upload_ignores_the_uploaded_filename_and_stores_one_canonical_credential(
+    client: TestClient, key_path: Path
+) -> None:
+    """The Google Cloud download name must never become a second credential file."""
+
+    headers = _bootstrap(client)
+    response = client.put(
+        "/api/v1/integrations/google-sheets/service-account",
+        content=_key_bytes(),
+        headers={
+            **headers,
+            "Content-Type": "application/json",
+            "Content-Disposition": (
+                'attachment; filename="example-project-000000-abcdef0123.json"'
+            ),
+        },
+    )
+
+    assert response.status_code == 200
+    assert [path.name for path in key_path.parent.iterdir()] == ["google-service-account.json"]
+    assert stat.S_IMODE(key_path.stat().st_mode) == 0o600
+    assert json.loads(key_path.read_text(encoding="utf-8"))["client_email"] == EMAIL
+
+
+def test_replacing_the_key_overwrites_the_canonical_file_without_a_second_credential(
+    client: TestClient, key_path: Path
+) -> None:
+    headers = _bootstrap(client)
+    first = client.put(
+        "/api/v1/integrations/google-sheets/service-account",
+        content=_key_bytes(),
+        headers={**headers, "Content-Type": "application/json"},
+    )
+    assert first.status_code == 200
+
+    second = client.put(
+        "/api/v1/integrations/google-sheets/service-account",
+        content=_key_bytes(OTHER_EMAIL),
+        headers={**headers, "Content-Type": "application/json"},
+    )
+
+    assert second.status_code == 200
+    assert second.json()["service_account_email"] == OTHER_EMAIL
+    assert [path.name for path in key_path.parent.iterdir()] == ["google-service-account.json"]
+    assert json.loads(key_path.read_text(encoding="utf-8"))["client_email"] == OTHER_EMAIL
+
+
+def test_invalid_json_leaves_the_installed_credential_untouched(
+    client: TestClient, key_path: Path
+) -> None:
+    headers = _bootstrap(client)
+    client.put(
+        "/api/v1/integrations/google-sheets/service-account",
+        content=_key_bytes(),
+        headers={**headers, "Content-Type": "application/json"},
+    )
+    installed = key_path.read_bytes()
+
+    response = client.put(
+        "/api/v1/integrations/google-sheets/service-account",
+        content=b"{not json",
+        headers={**headers, "Content-Type": "application/json"},
+    )
+
+    assert response.status_code == 422
+    assert response.json()["error"]["code"] == "key_invalid_json"
+    assert key_path.read_bytes() == installed
+
+
+def test_oauth_client_upload_leaves_the_installed_credential_untouched(
+    client: TestClient, key_path: Path
+) -> None:
+    headers = _bootstrap(client)
+    client.put(
+        "/api/v1/integrations/google-sheets/service-account",
+        content=_key_bytes(),
+        headers={**headers, "Content-Type": "application/json"},
+    )
+    installed = key_path.read_bytes()
+
+    response = client.put(
+        "/api/v1/integrations/google-sheets/service-account",
+        content=json.dumps({"installed": {"client_id": "x", "client_secret": "y"}}).encode(),
+        headers={**headers, "Content-Type": "application/json"},
+    )
+
+    assert response.status_code == 422
+    assert response.json()["error"]["code"] == "oauth_client_rejected"
+    assert key_path.read_bytes() == installed
 
 
 def test_spreadsheet_url_is_validated_and_not_echoed(client: TestClient) -> None:
