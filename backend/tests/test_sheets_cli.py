@@ -103,6 +103,25 @@ def test_check_reports_readiness_without_printing_the_spreadsheet_id(
     assert SPREADSHEET_ID not in output.err
 
 
+def test_init_clarifies_that_application_setup_is_still_required(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """`init` creates tabs only; it must not read as completed application setup."""
+
+    monkeypatch.setattr(
+        cli_module,
+        "build_google_sheets_foundation",
+        lambda settings: StubFoundation(_ready_result()),
+    )
+
+    exit_code = cli_module.main(["init"])
+
+    output = capsys.readouterr()
+    assert exit_code == 0
+    assert "job-hunter setup" in output.out
+    assert "still required" in output.out
+
 def test_missing_credentials_are_reported_with_a_stable_code(
     monkeypatch: pytest.MonkeyPatch,
     capsys: pytest.CaptureFixture[str],

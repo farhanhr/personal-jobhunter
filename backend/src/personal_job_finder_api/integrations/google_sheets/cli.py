@@ -261,6 +261,14 @@ def main(argv: Sequence[str] | None = None) -> int:
 
         result = foundation.initialize()
         _print_preflight(result)
+        if result.is_ready:
+            # Low-level operator tooling: this creates tabs only. It does not run
+            # setup orchestration and never marks the application workspace ready.
+            print(
+                "Note: tab initialization complete. Application setup "
+                "(`job-hunter setup`) is still required before the web app treats "
+                "this workspace as ready."
+            )
         return 0 if result.is_ready else 1
     except GoogleSheetsError as exc:
         print(f"{exc.code}: {exc}", file=sys.stderr)
