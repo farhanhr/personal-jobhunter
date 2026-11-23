@@ -201,6 +201,19 @@ def test_adding_and_updating_use_the_documented_request_names() -> None:
     assert "updateTable" in table.build_update_table_request(11, "t1")
 
 
+def test_adding_defers_column_properties_until_the_update() -> None:
+    """Live regression: ``addTable`` rewrites the header when given properties."""
+
+    add = table.build_add_table_request(11)["addTable"]["table"]
+    update = table.build_update_table_request(11, "t1")["updateTable"]["table"]
+
+    assert "columnProperties" not in add
+    assert len(update["columnProperties"]) == len(OPPORTUNITY_HEADERS)
+    assert [entry["columnName"] for entry in update["columnProperties"]] == list(
+        OPPORTUNITY_HEADERS
+    )
+
+
 def test_updating_replaces_every_field() -> None:
     body = table.build_update_table_request(11, "t1")
 

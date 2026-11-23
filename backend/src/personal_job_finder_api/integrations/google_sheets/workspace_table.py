@@ -205,7 +205,18 @@ def build_hide_helper_request(sheet_id: int) -> dict[str, object]:
 
 
 def build_add_table_request(sheet_id: int, rows: int | None = None) -> dict[str, object]:
-    return {"addTable": {"table": build_table(sheet_id, rows)}}
+    """Create the table without column properties.
+
+    Live verification: ``addTable`` with ``columnProperties`` writes the supplied
+    names into the header row and shifts them by the table's start row, corrupting
+    the canonical header. The provider also rejects more than 29 properties on
+    creation. Creating the table first and applying the properties with
+    ``updateTable`` keeps the header intact and accepts the full canonical set.
+    """
+
+    body = build_table(sheet_id, rows)
+    body.pop("columnProperties", None)
+    return {"addTable": {"table": body}}
 
 
 def build_update_table_request(
@@ -214,7 +225,9 @@ def build_update_table_request(
     """Replace the whole table definition, which is idempotent by construction.
 
     ``tableId`` is required: without it the provider rejects the update because it
-    cannot tell which table is being replaced.
+    cannot tell which table is being replaced. This is also the only safe place to
+    apply column names and dropdown rules, because ``addTable`` rewrites the
+    header row when it receives them.
     """
 
     body = build_table(sheet_id, rows)

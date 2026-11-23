@@ -14,6 +14,7 @@ import pytest
 
 from personal_job_finder_api.integrations.google_sheets import kpi_strip
 from personal_job_finder_api.integrations.google_sheets import workspace_repair as repair
+from personal_job_finder_api.integrations.google_sheets import workspace_table as table
 from personal_job_finder_api.integrations.google_sheets.config import (
     JOB_SOURCE_HEADERS,
     OPPORTUNITY_FIRST_DATA_ROW,
@@ -85,6 +86,7 @@ class FakeTransport:
         self.sheet_ids = {title: index for index, title in enumerate(self.tabs)}
         self.tables: dict[str, list[dict[str, Any]]] = {}
         self.frozen = {title: (1, 3) for title in self.tabs}
+        self.column_counts = {title: 34 for title in self.tabs}
         self.batches: list[list[dict[str, Any]]] = []
         self.value_updates: list[list[dict[str, Any]]] = []
         self.added_tabs: list[str] = []
@@ -104,7 +106,7 @@ class FakeTransport:
                             "frozenRowCount": self.frozen.get(title, (0, 0))[0],
                             "frozenColumnCount": self.frozen.get(title, (0, 0))[1],
                             "rowCount": 1000,
-                            "columnCount": 34,
+                            "columnCount": self.column_counts.get(title, 34),
                         },
                     },
                     "tables": self.tables.get(title, []),
@@ -204,6 +206,7 @@ class FakeTransport:
             while len(target) <= index:
                 target.append("")
             target[index] = value
+        self.column_counts[title] = max(self.column_counts.get(title, 0), len(target))
 
     def batch_update_values(
         self,
@@ -227,6 +230,7 @@ class FakeTransport:
                 title = body["addSheet"]["properties"]["title"]
                 self.tabs.setdefault(title, [])
                 self.sheet_ids[title] = 900 + len(self.added_tabs)
+                self.column_counts[title] = 26
                 self.added_tabs.append(title)
             elif "deleteSheet" in body:
                 sheet_id = body["deleteSheet"]["sheetId"]
@@ -245,7 +249,12 @@ class FakeTransport:
                     if sheet_id == body["updateTable"]["table"]["range"]["sheetId"]:
                         self.tables[title] = [_table_entry(body["updateTable"]["table"])]
             elif "appendDimension" in body:
-                pass
+                dimension = body["appendDimension"]
+                if dimension.get("dimension") == "COLUMNS":
+                    title = self._title_of(dimension["sheetId"])
+                    self.column_counts[title] = self.column_counts.get(title, 26) + int(
+                        dimension["length"]
+                    )
             elif "updateSheetProperties" in body:
                 properties = body["updateSheetProperties"]["properties"]
                 grid = properties.get("gridProperties")
@@ -530,6 +539,68 @@ def test_a_missing_table_is_created() -> None:
 
     assert "created the workspace table" in outcome.actions
     assert transport.tables["Opportunities"]
+
+
+def test_a_new_table_gets_its_column_rules_from_the_update() -> None:
+    """Live regression: ``addTable`` with names shifts the canonical header."""
+
+    transport = FakeTransport(
+        {
+            "Opportunities": [list(OPPORTUNITY_HEADERS)],
+            "Job_Sources": [list(JOB_SOURCE_HEADERS)],
+        }
+    )
+
+    _repair(transport)
+
+    add_requests = [body for batch in transport.batches for body in batch if "addTable" in body]
+    assert add_requests
+    assert "columnProperties" not in add_requests[0]["addTable"]["table"]
+
+    created = transport.tables["Opportunities"][0]
+    assert len(created["columnProperties"]) == len(OPPORTUNITY_HEADERS)
+    dropdowns = {
+        entry["columnName"]
+        for entry in created["columnProperties"]
+        if entry.get("columnType") == "DROPDOWN"
+    }
+    assert dropdowns == set(table.USER_DROPDOWNS)
+
+
+def test_the_grid_is_widened_before_a_new_table_is_created() -> None:
+    """A fresh tab has 26 columns; the table needs the canonical 33."""
+
+    transport = FakeTransport(
+        {
+            "Opportunities": [list(OPPORTUNITY_HEADERS)],
+            "Job_Sources": [list(JOB_SOURCE_HEADERS)],
+        }
+    )
+    transport.column_counts["Opportunities"] = 26
+
+    _repair(transport)
+
+    bodies = [body for batch in transport.batches for body in batch]
+    append_at = next(index for index, body in enumerate(bodies) if "appendDimension" in body)
+    add_at = next(index for index, body in enumerate(bodies) if "addTable" in body)
+    assert append_at < add_at
+    assert transport.column_counts["Opportunities"] >= len(OPPORTUNITY_HEADERS)
+
+
+def test_a_fresh_tab_is_widened_only_to_the_helper_column() -> None:
+    """The header write already widens the grid; do not append eight more."""
+
+    transport = FakeTransport(
+        {
+            "Opportunities": [],
+            "Job_Sources": [list(JOB_SOURCE_HEADERS)],
+        }
+    )
+    transport.column_counts["Opportunities"] = 26
+
+    _repair(transport)
+
+    assert transport.column_counts["Opportunities"] == len(OPPORTUNITY_HEADERS) + 1
 
 
 def test_an_existing_table_is_never_duplicated() -> None:

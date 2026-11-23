@@ -175,6 +175,12 @@ class WorkspaceRepairService:
 
         adopted = self._adopt_manual_rows()
 
+        # Writing the canonical header widens a fresh 26-column grid to 33
+        # columns. Refresh before measuring the helper column, or the stale
+        # column count appends too many columns.
+        if header_actions:
+            metadata = self._client.get_metadata(self._spreadsheet_id)
+
         sheet_id = metadata.sheet_id_for(table.OPPORTUNITY_TAB)
         if sheet_id is None:
             raise GoogleSheetsError(
@@ -182,6 +188,15 @@ class WorkspaceRepairService:
                 "The Opportunities tab exists but its sheet id is unavailable, so "
                 "the table cannot be repaired. Nothing was changed.",
             )
+
+        # The helper column widens a fresh 26-column tab to the canonical grid.
+        # It must exist before the table is created: a table that asks for 33
+        # columns on a narrower grid is clamped by the provider, and the column
+        # properties then no longer match the table.
+        helper = self._ensure_helper_column(sheet_id, metadata)
+        if helper:
+            actions.append(helper)
+            metadata = self._client.get_metadata(self._spreadsheet_id)
 
         presentation = force or not self._presentation_is_current(metadata)
         table_actions = self._repair_table(
@@ -191,11 +206,6 @@ class WorkspaceRepairService:
             refresh_table=presentation,
         )
         actions.extend(table_actions)
-
-        helper = self._ensure_helper_column(sheet_id, metadata)
-        if helper:
-            actions.append(helper)
-            metadata = self._client.get_metadata(self._spreadsheet_id)
 
         strip_actions = self._repair_presentation(sheet_id, metadata, force=force)
         actions.extend(strip_actions)
@@ -451,20 +461,49 @@ class WorkspaceRepairService:
             return []
 
         rows = properties.row_count if properties is not None else None
-        requests: list[dict[str, object]] = [table.build_freeze_request(sheet_id)]
         actions: list[str] = []
 
         if exists and not force and not refresh_table and covers_grid:
             # The table itself is healthy; only the frozen panes drifted.
+            self._client.batch_update(
+                self._spreadsheet_id,
+                [table.build_freeze_request(sheet_id)],
+            )
             actions.append("restored the frozen panes")
         elif exists:
-            requests.append(table.build_update_table_request(sheet_id, table_ids[0], rows))
+            self._client.batch_update(
+                self._spreadsheet_id,
+                [
+                    table.build_freeze_request(sheet_id),
+                    table.build_update_table_request(sheet_id, table_ids[0], rows),
+                ],
+            )
             actions.append("updated the workspace table")
         else:
-            requests.append(table.build_add_table_request(sheet_id, rows))
+            # ``addTable`` rewrites the header row when it receives column
+            # properties, so create the table bare and apply the columns with a
+            # follow-up update. The update needs the id the provider assigns.
+            self._client.batch_update(
+                self._spreadsheet_id,
+                [
+                    table.build_freeze_request(sheet_id),
+                    table.build_add_table_request(sheet_id, rows),
+                ],
+            )
+            created = self._client.get_metadata(self._spreadsheet_id)
+            created_ids = created.table_ids_for(table.OPPORTUNITY_TAB)
+            if not created_ids:
+                raise GoogleSheetsError(
+                    "workspace_table_missing",
+                    "Google Sheets accepted the table creation but did not report "
+                    "the new table, so its column rules could not be applied.",
+                )
+            self._client.batch_update(
+                self._spreadsheet_id,
+                [table.build_update_table_request(sheet_id, created_ids[0], rows)],
+            )
             actions.append("created the workspace table")
 
-        self._client.batch_update(self._spreadsheet_id, requests)
         return actions
 
 
