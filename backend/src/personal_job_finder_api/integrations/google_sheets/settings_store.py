@@ -190,6 +190,24 @@ class GoogleSheetsSettingsStore:
                 )
         return now
 
+    def clear_workspace_readiness(self) -> None:
+        """Forget that a workspace was validated, without forgetting the sheet.
+
+        The spreadsheet selection is kept, so the next setup run validates the
+        same sheet again. Only the readiness timestamp is dropped, because the
+        credential that validated it is no longer the installed one.
+        """
+
+        with immediate_transaction(self._engine) as connection:
+            connection.execute(
+                sa.update(google_sheets_settings)
+                .where(google_sheets_settings.c.settings_id == 1)
+                .values(
+                    workspace_ready_at_utc=None,
+                    updated_at_utc=format_utc(self._clock()),
+                )
+            )
+
     def clear(self) -> None:
         with immediate_transaction(self._engine) as connection:
             connection.execute(

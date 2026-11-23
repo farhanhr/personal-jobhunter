@@ -292,6 +292,119 @@ def test_oauth_client_upload_leaves_the_installed_credential_untouched(
     assert key_path.read_bytes() == installed
 
 
+def _ready_workspace(engine: Engine) -> None:
+    from personal_job_finder_api.integrations.google_sheets.settings_store import (
+        GoogleSheetsSettingsStore,
+    )
+
+    GoogleSheetsSettingsStore(engine).save_spreadsheet_id(
+        "1SyntheticSheetId0123456789abcdefXYZ",
+        workspace_ready_at=NOW,
+        configured_via="ui",
+    )
+
+
+def test_replacement_revalidates_access_and_clears_readiness_when_the_sheet_is_not_shared(
+    client: TestClient, engine: Engine, key_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A new identity that cannot open the sheet must not inherit the old readiness."""
+
+    _ready_workspace(engine)
+    headers = _bootstrap(client)
+
+    def denied(request: object, spreadsheet_id: str) -> None:
+        raise GoogleSheetsError(
+            "permission_denied",
+            "Google denied access to the spreadsheet.",
+        )
+
+    monkeypatch.setattr(
+        "personal_job_finder_api.api.v1.google_sheets_settings._revalidate_access",
+        denied,
+    )
+    response = client.put(
+        "/api/v1/integrations/google-sheets/service-account",
+        content=_key_bytes(OTHER_EMAIL),
+        headers={**headers, "Content-Type": "application/json"},
+    )
+
+    assert response.status_code == 422
+    assert response.json()["error"]["code"] == "permission_denied"
+    assert OTHER_EMAIL in response.json()["error"]["message"]
+    # The new key is installed even though it cannot reach the sheet yet.
+    assert json.loads(key_path.read_text(encoding="utf-8"))["client_email"] == OTHER_EMAIL
+    body = client.get("/api/v1/integrations/google-sheets/status").json()
+    assert body["workspace_ready"] is False
+    assert body["onboarding_required"] is True
+
+
+def test_replacement_that_reaches_the_sheet_keeps_the_workspace_ready(
+    client: TestClient, engine: Engine, key_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _ready_workspace(engine)
+    headers = _bootstrap(client)
+    checked: list[str] = []
+
+    def allowed(request: object, spreadsheet_id: str) -> None:
+        checked.append(spreadsheet_id)
+
+    monkeypatch.setattr(
+        "personal_job_finder_api.api.v1.google_sheets_settings._revalidate_access",
+        allowed,
+    )
+    response = client.put(
+        "/api/v1/integrations/google-sheets/service-account",
+        content=_key_bytes(OTHER_EMAIL),
+        headers={**headers, "Content-Type": "application/json"},
+    )
+
+    assert response.status_code == 200
+    assert checked == ["1SyntheticSheetId0123456789abcdefXYZ"]
+    body = client.get("/api/v1/integrations/google-sheets/status").json()
+    assert body["workspace_ready"] is True
+    assert body["state"] == "ready"
+    assert body["service_account_email"] == OTHER_EMAIL
+
+
+def test_revalidation_reads_the_configured_sheet_without_writing(
+    client: TestClient, engine: Engine, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The check is read-only and asks the sheet the application actually uses."""
+
+    from personal_job_finder_api.integrations.google_sheets.config import REQUIRED_TABS
+
+    class RecordingTransport:
+        def __init__(self) -> None:
+            self.requested: list[str] = []
+
+        def get_spreadsheet(self, spreadsheet_id: str) -> dict[str, object]:
+            self.requested.append(spreadsheet_id)
+            return {
+                "sheets": [
+                    {"properties": {"title": title, "sheetId": index}}
+                    for index, title in enumerate(REQUIRED_TABS)
+                ]
+            }
+
+        def batch_get_values(self, spreadsheet_id: str, ranges: list[str]) -> dict[str, object]:
+            return {"valueRanges": [{"values": []} for _ in ranges]}
+
+    _ready_workspace(engine)
+    headers = _bootstrap(client)
+    transport = RecordingTransport()
+    monkeypatch.setattr(client.app.state, "sync_transport_factory", lambda: transport)
+
+    response = client.put(
+        "/api/v1/integrations/google-sheets/service-account",
+        content=_key_bytes(OTHER_EMAIL),
+        headers={**headers, "Content-Type": "application/json"},
+    )
+
+    assert response.status_code == 200
+    assert transport.requested == ["1SyntheticSheetId0123456789abcdefXYZ"]
+    assert not hasattr(transport, "batch_update")
+
+
 def test_spreadsheet_url_is_validated_and_not_echoed(client: TestClient) -> None:
     headers = _bootstrap(client)
     client.put(

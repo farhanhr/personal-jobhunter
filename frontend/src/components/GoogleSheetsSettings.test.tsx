@@ -165,6 +165,53 @@ describe('GoogleSheetsSettings', () => {
     expect((init.headers as Record<string, string>)['Content-Type']).toBe('application/json')
   })
 
+  it('refreshes the status after a rejected upload so a stale ready state is not shown', async () => {
+    const notReadyAfterReplacement = {
+      ...awaiting,
+      state: 'configured',
+      message: 'A spreadsheet is configured. Run Save & Setup to validate it.',
+      spreadsheet_configured: true,
+      spreadsheet_source: 'ui',
+      workspace_ready: false,
+      onboarding_required: true,
+    }
+    let statusCalls = 0
+    const fetchMock = routes({
+      'GET /api/v1/integrations/google-sheets/status': () =>
+        json(statusCalls++ === 0 ? ready : notReadyAfterReplacement),
+      'PUT /api/v1/integrations/google-sheets/service-account': () =>
+        json(
+          {
+            error: {
+              code: 'permission_denied',
+              message:
+                'The key was saved, but Google denied access to the spreadsheet. Share it with pjf-writer@pjf-test-project.iam.gserviceaccount.com as Editor, then run Save & Setup again.',
+            },
+          },
+          422,
+        ),
+    })
+    vi.stubGlobal('fetch', fetchMock)
+    const user = userEvent.setup()
+
+    renderSettings()
+    await screen.findByText('Ready')
+    await unlock(user)
+
+    const file = new File([SYNTHETIC_KEY], 'example-project-000000-abcdef0123.json', {
+      type: 'application/json',
+    })
+    await user.upload(screen.getByLabelText('Service Account JSON key'), file)
+    await user.click(screen.getByRole('button', { name: 'Replace key' }))
+
+    expect(
+      await screen.findByText(/Share it with pjf-writer@pjf-test-project\.iam\.gserviceaccount\.com/),
+    ).toBeInTheDocument()
+    // The stale "Ready" verdict of the replaced credential must not survive.
+    await waitFor(() => expect(screen.getByText('Configured')).toBeInTheDocument())
+    expect(screen.queryByText('Ready')).not.toBeInTheDocument()
+  })
+
   it('never stores or renders the private key in the DOM or browser storage', async () => {
     vi.stubGlobal(
       'fetch',

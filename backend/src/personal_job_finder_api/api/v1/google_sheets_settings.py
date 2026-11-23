@@ -17,6 +17,9 @@ from personal_job_finder_api.api.security import validate_local_request
 from personal_job_finder_api.core.time import format_utc
 from personal_job_finder_api.integrations.google_sheets.errors import GoogleSheetsError
 from personal_job_finder_api.integrations.google_sheets.orchestration import run_setup
+from personal_job_finder_api.integrations.google_sheets.preflight import (
+    SpreadsheetPreflightService,
+)
 from personal_job_finder_api.integrations.google_sheets.service_account import (
     parse_service_account_key,
 )
@@ -43,6 +46,9 @@ router = APIRouter(
 MAX_KEY_BYTES = 64 * 1024
 SESSION_HEADER = "X-PJF-Setup-Token"
 SESSION_COOKIE = "pjf_setup_session"
+# Failures that mean the installed credential cannot use the spreadsheet. The
+# orchestration reports the same set, so both paths give the same guidance.
+ACCESS_ERROR_CODES = frozenset({"permission_denied", "spreadsheet_not_found", "reconnect_required"})
 
 
 class BootstrapExchange(BaseModel):
@@ -191,6 +197,65 @@ def exchange_bootstrap(
     return {"csrf_token": issued.csrf_token, "expires_at": issued.expires_at.isoformat()}
 
 
+def _revalidate_access(request: Request, spreadsheet_id: str) -> None:
+    """Read-only check that the installed credential can open the spreadsheet.
+
+    The transport is built from the canonical credential file, so this always
+    uses the key that was just installed, never the one it replaced. Nothing is
+    written to the spreadsheet.
+    """
+
+    transport = request.app.state.sync_transport_factory()
+    SpreadsheetPreflightService(transport).check(spreadsheet_id)
+
+
+def _revalidate_after_replacement(request: Request, email: str) -> ApiError | None:
+    """Confirm the newly installed credential can reach the configured sheet.
+
+    A replacement changes the identity the application presents to Google, so
+    the previous validation no longer applies. When the new Service Account
+    cannot open the spreadsheet, the workspace must be validated again before
+    it counts as ready, and the user is told which address to share.
+    """
+
+    state = request.app.state
+    try:
+        effective = effective_spreadsheet(state.engine, state.settings)
+    except GoogleSheetsError:
+        return None
+    if effective.spreadsheet_id is None:
+        return None
+    try:
+        _revalidate_access(request, effective.spreadsheet_id)
+    except GoogleSheetsError as error:
+        if error.code == "reconnect_required":
+            message = (
+                f"The key was saved, but Google rejected it. Create a new key for {email}, "
+                "then run Save & Setup again."
+            )
+        elif error.code == "spreadsheet_not_found":
+            message = (
+                "The key was saved, but the configured spreadsheet could not be found. "
+                "Check the spreadsheet link, then run Save & Setup again."
+            )
+        elif error.code == "permission_denied":
+            message = (
+                "The key was saved, but Google denied access to the spreadsheet. Share it "
+                f"with {email} as Editor, then run Save & Setup again."
+            )
+        else:
+            message = (
+                "The key was saved, but the spreadsheet could not be checked. "
+                "Run Save & Setup again."
+            )
+        if error.code in ACCESS_ERROR_CODES:
+            # The credential that validated this workspace is gone, so the
+            # workspace is not ready until setup validates it again.
+            GoogleSheetsSettingsStore(state.engine).clear_workspace_readiness()
+        return ApiError(422, error.code, message)
+    return None
+
+
 @router.put("/service-account", response_model=IntegrationStatus)
 async def replace_service_account(request: Request, response: Response) -> IntegrationStatus:
     _require_session(request)
@@ -205,6 +270,9 @@ async def replace_service_account(request: Request, response: Response) -> Integ
         save_service_account_key(request.app.state.settings, key)
     except GoogleSheetsError as error:
         raise ApiError(422, error.code, str(error)) from None
+    failure = _revalidate_after_replacement(request, key.client_email)
+    if failure is not None:
+        raise failure
     response.headers["Cache-Control"] = "no-store"
     return _status(request)
 

@@ -82,7 +82,11 @@ export function GoogleSheetsSettings() {
     }
   }
 
-  async function run<T>(action: (token: string) => Promise<T>, after: (value: T) => void) {
+  async function run<T>(
+    action: (token: string) => Promise<T>,
+    after: (value: T) => void,
+    onError?: () => void,
+  ) {
     if (!csrfToken) {
       setActionError('Unlock this section with the local setup token first.')
       return
@@ -96,6 +100,7 @@ export function GoogleSheetsSettings() {
         setCsrfToken(null)
       }
       setActionError(errorMessage(error))
+      onError?.()
     } finally {
       setBusy(false)
     }
@@ -117,6 +122,12 @@ export function GoogleSheetsSettings() {
         if (fileInput.current) {
           fileInput.current.value = ''
         }
+      },
+      () => {
+        // A rejected replacement can invalidate the workspace the previous
+        // credential validated, so the displayed verdict must be refreshed
+        // instead of keeping a stale "Ready".
+        void fetchIntegrationStatus().then(setStatus).catch(() => undefined)
       },
     )
   }
