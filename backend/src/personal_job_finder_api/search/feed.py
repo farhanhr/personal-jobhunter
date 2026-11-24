@@ -12,12 +12,17 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 
-from sqlalchemy import Engine, func, select
+from sqlalchemy import Engine, case, func, select
 
 from personal_job_finder_api.db.tables import (
     job_sources,
     opportunities,
     opportunity_run_refs,
+)
+from personal_job_finder_api.domain.candidate_fit import (
+    CandidateFitSummary,
+    is_best_fit,
+    parse_candidate_fit_summary,
 )
 from personal_job_finder_api.search.tracker_read import (
     TrackerView,
@@ -27,6 +32,7 @@ from personal_job_finder_api.search.tracker_read import (
 DESCRIPTION_EXCERPT_CHARS = 500
 MAX_PAGE_SIZE = 100
 DEFAULT_PAGE_SIZE = 25
+FEED_SORT_OPTIONS = ("recent", "best_fit")
 
 
 @dataclass(frozen=True, slots=True)
@@ -64,7 +70,14 @@ class OpportunitySummary:
     description_excerpt: str | None
     has_more_description: bool
     tracker: TrackerView
+    candidate_fit_score: int | None = None
+    candidate_fit_summary: CandidateFitSummary | None = None
+    candidate_fit_evaluated_at: str | None = None
     sources: tuple[SourceSummary, ...] = field(default=())
+
+    @property
+    def is_best_fit(self) -> bool:
+        return is_best_fit(self.candidate_fit_score)
 
 
 @dataclass(frozen=True, slots=True)
@@ -94,7 +107,14 @@ class OpportunityDetail:
     feed_bucket: str
     description: str | None
     tracker: TrackerView
+    candidate_fit_score: int | None = None
+    candidate_fit_summary: CandidateFitSummary | None = None
+    candidate_fit_evaluated_at: str | None = None
     sources: tuple[SourceSummary, ...] = field(default=())
+
+    @property
+    def is_best_fit(self) -> bool:
+        return is_best_fit(self.candidate_fit_score)
 
 
 @dataclass(frozen=True, slots=True)
@@ -117,11 +137,20 @@ class OpportunityFeedService:
     def __init__(self, engine: Engine) -> None:
         self._engine = engine
 
-    def list_feed(self, *, feed: str, page: int, page_size: int) -> FeedPage:
+    def list_feed(
+        self,
+        *,
+        feed: str,
+        page: int,
+        page_size: int,
+        sort_by: str = "recent",
+    ) -> FeedPage:
         if page < 1:
             raise ValueError("page must be at least 1")
         if not 1 <= page_size <= MAX_PAGE_SIZE:
             raise ValueError(f"page_size must be between 1 and {MAX_PAGE_SIZE}")
+        if sort_by not in FEED_SORT_OPTIONS:
+            raise ValueError(f"sort_by must be one of {FEED_SORT_OPTIONS}")
 
         offset = (page - 1) * page_size
 
@@ -136,12 +165,7 @@ class OpportunityFeedService:
                 connection.execute(
                     select(opportunities)
                     .where(opportunities.c.feed_bucket == feed)
-                    .order_by(
-                        # First-seen is immutable, so paging stays stable while
-                        # new runs re-observe existing records.
-                        opportunities.c.first_seen_at_utc.desc(),
-                        opportunities.c.opportunity_id.asc(),
-                    )
+                    .order_by(*_order_by(sort_by))
                     .limit(page_size)
                     .offset(offset)
                 )
@@ -247,6 +271,28 @@ class OpportunityFeedService:
         return {key: tuple(value) for key, value in grouped.items()}
 
 
+def _order_by(sort_by: str) -> tuple:
+    """A total order, so paging never repeats or skips a row.
+
+    ``best_fit`` puts every evaluated opportunity before the unevaluated ones and
+    then ranks by score, which also puts scores of 90 or more at the very top.
+    """
+
+    if sort_by == "best_fit":
+        return (
+            case((opportunities.c.candidate_fit_score.is_(None), 1), else_=0),
+            opportunities.c.candidate_fit_score.desc(),
+            opportunities.c.first_seen_at_utc.desc(),
+            opportunities.c.opportunity_id.asc(),
+        )
+    # First-seen is immutable, so paging stays stable while new runs re-observe
+    # existing records.
+    return (
+        opportunities.c.first_seen_at_utc.desc(),
+        opportunities.c.opportunity_id.asc(),
+    )
+
+
 def _to_summary(
     row,
     sources: tuple[SourceSummary, ...],
@@ -282,6 +328,9 @@ def _to_summary(
         description_excerpt=excerpt,
         has_more_description=has_more,
         tracker=tracker,
+        candidate_fit_score=row["candidate_fit_score"],
+        candidate_fit_summary=parse_candidate_fit_summary(row["candidate_fit_summary"]),
+        candidate_fit_evaluated_at=row["candidate_fit_evaluated_at"],
         sources=sources,
     )
 
@@ -315,5 +364,8 @@ def _to_detail(
         feed_bucket=row["feed_bucket"],
         description=row["description"],
         tracker=tracker,
+        candidate_fit_score=row["candidate_fit_score"],
+        candidate_fit_summary=parse_candidate_fit_summary(row["candidate_fit_summary"]),
+        candidate_fit_evaluated_at=row["candidate_fit_evaluated_at"],
         sources=sources,
     )

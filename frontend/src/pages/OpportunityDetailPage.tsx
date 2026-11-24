@@ -7,6 +7,7 @@ import {
   type TrackerState,
 } from '../api/opportunities'
 import { fetchTargetRoles } from '../api/targetRoles'
+import { FitAnalysisSection } from '../components/FitAnalysisSection'
 import { PageHeader } from '../components/PageHeader'
 import { TrackerEditor } from '../components/TrackerEditor'
 import { useResource } from '../hooks/useResource'
@@ -295,6 +296,8 @@ export function OpportunityDetailPage() {
           </div>
         )}
       </section>
+
+      <FitAnalysisSection detail={detail} />
 
       <section className="settings-panel" aria-labelledby="sources-heading">
         <div className="settings-heading">

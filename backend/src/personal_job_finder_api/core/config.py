@@ -126,6 +126,11 @@ class Settings:
         default_factory=lambda: _env_int("GOOGLE_SHEETS_BATCH_SIZE", 25)
     )
 
+    # A connection test must fail fast enough to keep the Settings UI responsive.
+    ai_timeout_seconds: float = field(
+        default_factory=lambda: _env_float("AI_TIMEOUT_SECONDS", 10.0)
+    )
+
     def __post_init__(self) -> None:
         object.__setattr__(self, "data_dir", Path(self.data_dir).expanduser().resolve())
         object.__setattr__(self, "local_dir", Path(self.local_dir).expanduser().resolve())

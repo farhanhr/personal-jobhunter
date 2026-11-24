@@ -46,6 +46,9 @@ const opportunity = {
   feed_bucket: 'main',
   description_excerpt: 'Build dashboards for the analytics team.',
   has_more_description: true,
+  candidate_fit_score: null,
+  candidate_fit_summary: null,
+  is_best_fit: false,
   tracker_summary: { ...trackerSummary },
   sources: [
     {
@@ -285,6 +288,10 @@ const detailPayload = {
   notes: 'Referred by a former colleague.',
   sync_status: 'pending',
   known_fields: ['application_status', 'date_applied', 'job_type'],
+  candidate_fit_score: null,
+  candidate_fit_summary: null,
+  candidate_fit_evaluated_at: null,
+  is_best_fit: false,
   sources: [
     {
       source_type: 'greenhouse',

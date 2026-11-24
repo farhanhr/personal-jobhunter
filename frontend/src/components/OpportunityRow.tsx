@@ -1,6 +1,7 @@
 import type { Opportunity } from '../api/opportunities'
 import { Link } from 'react-router'
 import { formatJakartaInstant } from '../lib/datetime'
+import { fitBadgeClass, fitBadgeText } from '../lib/fitLabels'
 import { remoteScopeLabel, workModeLabel } from '../lib/locationLabels'
 import { TRACKER_FIELD_LABELS, TRACKER_SYNC_LABELS } from '../lib/trackerLabels'
 
@@ -149,6 +150,18 @@ export function OpportunityRow({
   return (
     <li className="opportunity-row">
       <div className="opportunity-main">
+        {opportunity.candidate_fit_score !== null && (
+          <p className="opportunity-fit">
+            <span className={fitBadgeClass(opportunity.candidate_fit_score)}>
+              {fitBadgeText(opportunity.candidate_fit_score)}
+            </span>
+            {opportunity.candidate_fit_summary !== null && (
+              <span className="fit-verdict">
+                {opportunity.candidate_fit_summary.fit_verdict}
+              </span>
+            )}
+          </p>
+        )}
         <h2 className="opportunity-title">
           <Link
             className="opportunity-title-link"

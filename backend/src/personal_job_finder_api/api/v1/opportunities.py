@@ -13,12 +13,21 @@ from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from personal_job_finder_api.api.errors import ApiError
 from personal_job_finder_api.api.security import validate_local_request
+from personal_job_finder_api.core.time import format_utc
+from personal_job_finder_api.cv.tailored import (
+    TailoredCVError,
+    TailoredCVMode,
+    TailoredCVResponse,
+    TailoredCVService,
+)
+from personal_job_finder_api.domain.candidate_fit import CandidateFitSummary, is_best_fit
 from personal_job_finder_api.search.feed import (
     DEFAULT_PAGE_SIZE,
     MAX_PAGE_SIZE,
     FeedPage,
     OpportunityFeedService,
 )
+from personal_job_finder_api.search.fit import CandidateFitService, FitError
 from personal_job_finder_api.search.tracker import (
     TRACKER_FIELDS,
     OpportunityTrackerService,
@@ -32,6 +41,7 @@ router = APIRouter(
 )
 
 FeedName = Literal["main", "review"]
+FeedSort = Literal["recent", "best_fit"]
 
 # The contract fixes this at 10,000 characters; a longer note is rejected rather
 # than silently truncated, so the user's text is never altered.
@@ -82,6 +92,9 @@ class OpportunityResponse(BaseModel):
     description_excerpt: str | None
     has_more_description: bool
     tracker_summary: TrackerSummaryResponse
+    candidate_fit_score: int | None = None
+    candidate_fit_summary: CandidateFitSummary | None = None
+    is_best_fit: bool = False
     sources: list[SourceSummaryResponse]
 
 
@@ -119,6 +132,10 @@ class OpportunityDetailResponse(BaseModel):
     notes: str | None
     sync_status: str
     known_fields: list[str]
+    candidate_fit_score: int | None = None
+    candidate_fit_summary: CandidateFitSummary | None = None
+    candidate_fit_evaluated_at: str | None = None
+    is_best_fit: bool = False
     sources: list[SourceSummaryResponse]
 
 
@@ -128,6 +145,16 @@ class OpportunityFeedResponse(BaseModel):
     page_size: int
     total_items: int
     total_pages: int
+
+
+class OpportunityFitResponse(BaseModel):
+    """The stored result of one fit evaluation."""
+
+    opportunity_id: str
+    candidate_fit_score: int
+    is_best_fit: bool
+    summary: CandidateFitSummary
+    evaluated_at_utc: str
 
 
 class TrackerPatchRequest(BaseModel):
@@ -189,6 +216,22 @@ def get_tracker_service(request: Request) -> OpportunityTrackerService:
     )
 
 
+def get_fit_service(request: Request) -> CandidateFitService:
+    return CandidateFitService(
+        request.app.state.engine,
+        timeout=request.app.state.settings.ai_timeout_seconds,
+        clock=request.app.state.clock,
+    )
+
+
+def get_tailored_cv_service(request: Request) -> TailoredCVService:
+    return TailoredCVService(
+        request.app.state.engine,
+        timeout=request.app.state.settings.ai_timeout_seconds,
+        clock=request.app.state.clock,
+    )
+
+
 @router.get("/jobs", response_model=OpportunityFeedResponse)
 def list_opportunities(
     response: Response,
@@ -196,10 +239,20 @@ def list_opportunities(
     feed: FeedName = "main",
     page: Annotated[int, Query(ge=1)] = 1,
     page_size: Annotated[int, Query(ge=1, le=MAX_PAGE_SIZE)] = DEFAULT_PAGE_SIZE,
+    sort_by: FeedSort = "recent",
 ) -> OpportunityFeedResponse:
-    """Return one page of the main feed or the review queue."""
+    """Return one page of the main feed or the review queue.
 
-    page_result = service.list_feed(feed=feed, page=page, page_size=page_size)
+    ``sort_by=best_fit`` ranks evaluated opportunities by candidate fit, so the
+    strongest matches appear first; unevaluated records follow.
+    """
+
+    page_result = service.list_feed(
+        feed=feed,
+        page=page,
+        page_size=page_size,
+        sort_by=sort_by,
+    )
     response.headers["Cache-Control"] = "no-store"
     return _to_response(page_result)
 
@@ -271,6 +324,77 @@ def update_tracker(
     )
 
 
+@router.post(
+    "/opportunities/{opportunity_id}/analyze-fit",
+    response_model=OpportunityFitResponse,
+)
+async def analyze_fit(
+    opportunity_id: str,
+    response: Response,
+    service: Annotated[CandidateFitService, Depends(get_fit_service)],
+) -> OpportunityFitResponse:
+    """Evaluate this opportunity against the stored master CV, then cache it.
+
+    The evaluation is explicit and per-opportunity: nothing is evaluated in the
+    background, and the user's token budget is spent only on request.
+    """
+
+    try:
+        result = await service.analyze(opportunity_id)
+    except FitError as error:
+        raise _fit_api_error(error) from None
+
+    response.headers["Cache-Control"] = "no-store"
+    return OpportunityFitResponse(
+        opportunity_id=result.opportunity_id,
+        candidate_fit_score=result.summary.candidate_fit_score,
+        is_best_fit=is_best_fit(result.summary.candidate_fit_score),
+        summary=result.summary,
+        evaluated_at_utc=format_utc(result.evaluated_at),
+    )
+
+
+def _fit_api_error(error: FitError) -> ApiError:
+    return _ai_api_error(error.code, error.message)
+
+
+@router.post(
+    "/opportunities/{opportunity_id}/tailored-cv",
+    response_model=TailoredCVResponse,
+)
+async def generate_tailored_cv(
+    opportunity_id: str,
+    response: Response,
+    service: Annotated[TailoredCVService, Depends(get_tailored_cv_service)],
+    mode: TailoredCVMode = "optimize",
+) -> TailoredCVResponse:
+    """Generate an ATS-tailored CV for this opportunity in the chosen mode.
+
+    ``optimize`` only rewords what the CV already says; ``ultra_optimize`` may add
+    learnable skills and always returns an upskilling checklist.
+    """
+
+    try:
+        tailored = await service.generate(opportunity_id, mode)
+    except TailoredCVError as error:
+        raise _ai_api_error(error.code, error.message) from None
+
+    response.headers["Cache-Control"] = "no-store"
+    return tailored
+
+
+def _ai_api_error(code: str, message: str) -> ApiError:
+    """One status mapping for every AI feature error."""
+
+    status_code = {
+        "opportunity_not_found": 404,
+        "ai_not_configured": 400,
+        "candidate_profile_missing": 400,
+        "missing_description": 400,
+    }.get(code, 502)
+    return ApiError(status_code, code, message)
+
+
 def _to_source_response(source) -> SourceSummaryResponse:
     return SourceSummaryResponse(
         source_type=source.source_type,
@@ -320,6 +444,9 @@ def _to_response(page_result: FeedPage) -> OpportunityFeedResponse:
                 description_excerpt=item.description_excerpt,
                 has_more_description=item.has_more_description,
                 tracker_summary=_to_tracker_summary(item.tracker),
+                candidate_fit_score=item.candidate_fit_score,
+                candidate_fit_summary=item.candidate_fit_summary,
+                is_best_fit=item.is_best_fit,
                 sources=[_to_source_response(source) for source in item.sources],
             )
             for item in page_result.items
@@ -364,5 +491,9 @@ def _to_detail_response(detail) -> OpportunityDetailResponse:
         notes=detail.tracker.values.get("notes"),
         sync_status=detail.tracker.sync_status,
         known_fields=list(detail.tracker.known_fields),
+        candidate_fit_score=detail.candidate_fit_score,
+        candidate_fit_summary=detail.candidate_fit_summary,
+        candidate_fit_evaluated_at=detail.candidate_fit_evaluated_at,
+        is_best_fit=detail.is_best_fit,
         sources=[_to_source_response(source) for source in detail.sources],
     )

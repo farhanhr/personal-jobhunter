@@ -13,6 +13,29 @@
 
 export type OpportunityFeedName = 'main' | 'review'
 
+/** `best_fit` ranks evaluated opportunities by candidate fit, highest first. */
+export type OpportunityFeedSort = 'recent' | 'best_fit'
+
+/**
+ * One AI fit evaluation, cached by the backend on the opportunity.
+ * `candidate_fit_score` is separate from the rule-based role match.
+ */
+export type CandidateFitSummary = {
+  candidate_fit_score: number
+  fit_verdict: string
+  matching_skills: string[]
+  missing_skills: string[]
+  rationale: string
+}
+
+export type OpportunityFitResult = {
+  opportunity_id: string
+  candidate_fit_score: number
+  is_best_fit: boolean
+  summary: CandidateFitSummary
+  evaluated_at_utc: string
+}
+
 export type OpportunitySource = {
   source_type: string
   external_source_id: string
@@ -55,6 +78,9 @@ export type Opportunity = {
   description_excerpt: string | null
   has_more_description: boolean
   tracker_summary: OpportunityTrackerSummary
+  candidate_fit_score: number | null
+  candidate_fit_summary: CandidateFitSummary | null
+  is_best_fit: boolean
   sources: OpportunitySource[]
 }
 
@@ -119,6 +145,10 @@ export type OpportunityDetail = {
   notes: string | null
   sync_status: string
   known_fields: string[]
+  candidate_fit_score: number | null
+  candidate_fit_summary: CandidateFitSummary | null
+  candidate_fit_evaluated_at: string | null
+  is_best_fit: boolean
   sources: OpportunitySource[]
 }
 
@@ -167,6 +197,45 @@ function isNonNegativeInteger(value: unknown): value is number {
 
 function isStringArray(value: unknown): value is string[] {
   return Array.isArray(value) && value.every((item) => typeof item === 'string')
+}
+
+function isFitScore(value: unknown): value is number {
+  return (
+    typeof value === 'number' &&
+    Number.isInteger(value) &&
+    value >= 0 &&
+    value <= 100
+  )
+}
+
+function isNullableFitScore(value: unknown): value is number | null {
+  return value === null || isFitScore(value)
+}
+
+function isCandidateFitSummary(value: unknown): value is CandidateFitSummary {
+  return (
+    isRecord(value) &&
+    isFitScore(value.candidate_fit_score) &&
+    typeof value.fit_verdict === 'string' &&
+    isStringArray(value.matching_skills) &&
+    isStringArray(value.missing_skills) &&
+    typeof value.rationale === 'string'
+  )
+}
+
+function isNullableFitSummary(value: unknown): value is CandidateFitSummary | null {
+  return value === null || isCandidateFitSummary(value)
+}
+
+function isOpportunityFitResult(value: unknown): value is OpportunityFitResult {
+  return (
+    isRecord(value) &&
+    typeof value.opportunity_id === 'string' &&
+    isFitScore(value.candidate_fit_score) &&
+    typeof value.is_best_fit === 'boolean' &&
+    isCandidateFitSummary(value.summary) &&
+    typeof value.evaluated_at_utc === 'string'
+  )
 }
 
 function isSource(value: unknown): value is OpportunitySource {
@@ -219,6 +288,9 @@ function isOpportunity(value: unknown): value is Opportunity {
     isNullableString(value.description_excerpt) &&
     typeof value.has_more_description === 'boolean' &&
     isTrackerSummary(value.tracker_summary) &&
+    isNullableFitScore(value.candidate_fit_score) &&
+    isNullableFitSummary(value.candidate_fit_summary) &&
+    typeof value.is_best_fit === 'boolean' &&
     Array.isArray(value.sources) &&
     value.sources.every(isSource)
   )
@@ -270,6 +342,10 @@ function isOpportunityDetail(value: unknown): value is OpportunityDetail {
     isNullableString(value.notes) &&
     typeof value.sync_status === 'string' &&
     isStringArray(value.known_fields) &&
+    isNullableFitScore(value.candidate_fit_score) &&
+    isNullableFitSummary(value.candidate_fit_summary) &&
+    isNullableString(value.candidate_fit_evaluated_at) &&
+    typeof value.is_best_fit === 'boolean' &&
     Array.isArray(value.sources) &&
     value.sources.every(isSource)
   )
@@ -414,6 +490,7 @@ export async function fetchOpportunityFeed(
     feed: OpportunityFeedName
     page?: number
     pageSize?: number
+    sortBy?: OpportunityFeedSort
     signal?: AbortSignal
   },
 ): Promise<OpportunityFeedPage> {
@@ -424,6 +501,9 @@ export async function fetchOpportunityFeed(
     'page_size',
     String(options.pageSize ?? DEFAULT_PAGE_SIZE),
   )
+  if (options.sortBy === 'best_fit') {
+    params.set('sort_by', options.sortBy)
+  }
 
   const response = await fetch(`/api/v1/jobs?${params.toString()}`, {
     headers: { Accept: 'application/json' },
@@ -431,4 +511,38 @@ export async function fetchOpportunityFeed(
   })
 
   return readResponse(response)
+}
+
+/**
+ * Evaluate this opportunity against the stored master CV.
+ *
+ * The backend caches the result, so a re-analysis is an explicit user action and
+ * the only thing that spends tokens again.
+ */
+export async function analyzeFit(
+  opportunityId: string,
+  signal?: AbortSignal,
+): Promise<OpportunityFitResult> {
+  const response = await fetch(
+    `/api/v1/opportunities/${encodeURIComponent(opportunityId)}/analyze-fit`,
+    {
+      method: 'POST',
+      headers: { Accept: 'application/json' },
+      signal,
+    },
+  )
+  const payload = await readJson(response)
+
+  if (!response.ok) {
+    throw errorFromPayload(payload, response.status)
+  }
+
+  if (!isOpportunityFitResult(payload)) {
+    throw new OpportunitiesApiError(
+      'The fit analysis endpoint returned an unexpected payload.',
+      { code: 'unexpected_payload', status: response.status },
+    )
+  }
+
+  return payload
 }

@@ -9,7 +9,7 @@ from personal_job_finder_api.db.engine import create_engine_for_url
 from personal_job_finder_api.db.migrate import downgrade_database, run_migrations
 from personal_job_finder_api.db.tables import google_sheets_settings
 
-HEAD_REVISION = "0006_google_sheets_workspace_state"
+HEAD_REVISION = "0009_candidate_fit"
 SETTINGS_REVISION = "0005_google_sheets_settings"
 
 

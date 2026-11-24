@@ -49,6 +49,10 @@ const detail = {
     'application_status',
     'follow_up_date',
   ],
+  candidate_fit_score: null,
+  candidate_fit_summary: null,
+  candidate_fit_evaluated_at: null,
+  is_best_fit: false,
   sources: [
     {
       source_type: 'greenhouse',

@@ -1,4 +1,4 @@
-import { render, screen, within } from '@testing-library/react'
+import { render, screen, waitFor, within } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import { MemoryRouter, Routes, Route } from 'react-router'
 import { afterEach, describe, expect, it, vi } from 'vitest'
@@ -44,6 +44,9 @@ const opportunity = {
   feed_bucket: 'main',
   description_excerpt: 'Build dashboards for the analytics team.',
   has_more_description: true,
+  candidate_fit_score: null,
+  candidate_fit_summary: null,
+  is_best_fit: false,
   tracker_summary: { ...trackerPending },
   sources: [
     {
@@ -377,9 +380,10 @@ describe('OpportunitiesPage', () => {
     await screen.findByText('Data Analyst')
 
     // No search input, no fake filter, no per-page fudge: the row count on the
-    // page comes from the response, and the only controls are tabs and paging.
+    // page comes from the response. The only controls are tabs, sort order, and
+    // paging, and sorting is performed by the backend.
     expect(screen.queryByRole('searchbox')).not.toBeInTheDocument()
-    expect(screen.queryByRole('combobox')).not.toBeInTheDocument()
+    expect(screen.getByLabelText('Sort')).toBeInTheDocument()
     expect(screen.getByText('1–2 of 2, page 1 of 1.')).toBeInTheDocument()
   })
 })
@@ -413,5 +417,65 @@ describe('feed to detail navigation', () => {
     const links = within(row).getAllByRole('link')
     expect(links).toHaveLength(2)
     expect(within(row).queryByRole('button')).not.toBeInTheDocument()
+  })
+
+  it('renders Best Fit and standard fit badges', async () => {
+    const summary = {
+      candidate_fit_score: 92,
+      fit_verdict: 'Strong Match',
+      matching_skills: [],
+      missing_skills: [],
+      rationale: 'Close match.',
+    }
+    vi.stubGlobal(
+      'fetch',
+      vi.fn().mockResolvedValue(
+        mockResponse(
+          feedPage({
+            items: [
+              {
+                ...opportunity,
+                opportunity_id: 'opp_best',
+                job_title: 'Best Fit Role',
+                candidate_fit_score: 92,
+                candidate_fit_summary: summary,
+                is_best_fit: true,
+              },
+              {
+                ...opportunity,
+                opportunity_id: 'opp_ok',
+                job_title: 'Partial Fit Role',
+                candidate_fit_score: 78,
+                candidate_fit_summary: { ...summary, candidate_fit_score: 78 },
+                is_best_fit: false,
+              },
+            ],
+            total_items: 2,
+          }),
+        ),
+      ),
+    )
+
+    renderPage()
+
+    expect(await screen.findByText('⭐ Best Fit (92%)')).toBeInTheDocument()
+    expect(screen.getByText('Fit: 78%')).toBeInTheDocument()
+  })
+
+  it('asks the API for Best Fit ordering when the sort changes', async () => {
+    const fetchMock = mockApi()
+    vi.stubGlobal('fetch', fetchMock)
+
+    renderPage()
+    await screen.findByText('Data Analyst')
+
+    await userEvent.selectOptions(screen.getByLabelText('Sort'), 'best_fit')
+
+    await waitFor(() => {
+      const requested = fetchMock.mock.calls.map(([input]) => String(input))
+      expect(
+        requested.some((url) => url.includes('sort_by=best_fit')),
+      ).toBe(true)
+    })
   })
 })

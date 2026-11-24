@@ -219,6 +219,9 @@ function createApi(options: ApiOptions = {}) {
       description_excerpt: `Short excerpt for ${title}.`,
       has_more_description: true,
       tracker_summary: trackerSummary(),
+      candidate_fit_score: null,
+      candidate_fit_summary: null,
+      is_best_fit: false,
       sources: [SAFE_SOURCE, UNSAFE_SOURCE],
     }
   }
@@ -258,6 +261,10 @@ function createApi(options: ApiOptions = {}) {
       notes: tracker.values.notes,
       sync_status: tracker.syncStatus,
       known_fields: [...tracker.known].sort(),
+      candidate_fit_score: null,
+      candidate_fit_summary: null,
+      candidate_fit_evaluated_at: null,
+      is_best_fit: false,
       sources: item.sources,
     }
   }

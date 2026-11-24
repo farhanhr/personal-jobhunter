@@ -144,6 +144,11 @@ opportunities = sa.Table(
     sa.Column("content_hash", sa.String(64), nullable=False),
     sa.Column("created_at_utc", sa.String(32), nullable=False),
     sa.Column("updated_at_utc", sa.String(32), nullable=False),
+    # Candidate fit is cached on the staging row, which a Sheets refresh never
+    # rewrites (ADR-030). A NULL score means "not evaluated yet", not "poor fit".
+    sa.Column("candidate_fit_score", sa.Integer, nullable=True),
+    sa.Column("candidate_fit_summary", sa.Text, nullable=True),
+    sa.Column("candidate_fit_evaluated_at", sa.String(32), nullable=True),
     sa.CheckConstraint(
         f"location_status IN ({_location_sql})",
         name="ck_opportunities_location_status",
@@ -301,6 +306,57 @@ google_sheets_settings = sa.Table(
     sa.Column("configured_via", sa.String(16), nullable=True),
     sa.Column("updated_at_utc", sa.String(32), nullable=False),
     sa.CheckConstraint("settings_id = 1", name="ck_google_sheets_settings_singleton"),
+)
+
+
+AI_PROVIDER_VALUES = ("custom", "groq", "openrouter", "deepseek", "gemini", "ollama")
+DEFAULT_AI_PROVIDER = "custom"
+DEFAULT_AI_MODEL = "llama-3.3-70b-versatile"
+
+_ai_provider_sql = ", ".join(f"'{value}'" for value in AI_PROVIDER_VALUES)
+
+# Bring-your-own-key AI provider configuration (ADR-030). A single row holds the
+# active endpoint; ``api_key`` is the user's own secret and never leaves the
+# local machine except to the provider the user chose.
+ai_settings = sa.Table(
+    "ai_settings",
+    metadata,
+    sa.Column("id", sa.Integer, primary_key=True),
+    sa.Column(
+        "provider",
+        sa.String(32),
+        nullable=False,
+        server_default=sa.text(f"'{DEFAULT_AI_PROVIDER}'"),
+    ),
+    sa.Column("base_url", sa.Text, nullable=False),
+    sa.Column("api_key", sa.Text, nullable=True),
+    sa.Column(
+        "model",
+        sa.String(200),
+        nullable=False,
+        server_default=sa.text(f"'{DEFAULT_AI_MODEL}'"),
+    ),
+    sa.Column("is_configured", sa.Boolean, nullable=False, server_default=sa.text("0")),
+    sa.Column("updated_at_utc", sa.String(32), nullable=False),
+    sa.CheckConstraint("id = 1", name="ck_ai_settings_singleton"),
+    sa.CheckConstraint(
+        f"provider IN ({_ai_provider_sql})",
+        name="ck_ai_settings_provider",
+    ),
+)
+
+
+# The active master CV. The raw extracted text is kept so a re-parse never needs
+# the original upload, and so the user can see exactly what the AI was given.
+candidate_profiles = sa.Table(
+    "candidate_profiles",
+    metadata,
+    sa.Column("id", sa.Integer, primary_key=True),
+    sa.Column("raw_text", sa.Text, nullable=False),
+    sa.Column("profile_json", sa.Text, nullable=False),
+    sa.Column("file_name", sa.Text, nullable=True),
+    sa.Column("updated_at_utc", sa.String(32), nullable=False),
+    sa.CheckConstraint("id = 1", name="ck_candidate_profiles_singleton"),
 )
 
 

@@ -2,7 +2,9 @@
 
 from fastapi import APIRouter
 
+from personal_job_finder_api.api.v1.ai import router as ai_router
 from personal_job_finder_api.api.v1.companies import router as companies_router
+from personal_job_finder_api.api.v1.cv import router as cv_router
 from personal_job_finder_api.api.v1.dashboard import router as dashboard_router
 from personal_job_finder_api.api.v1.google_sheets_settings import (
     router as google_sheets_settings_router,
@@ -17,7 +19,9 @@ from personal_job_finder_api.api.v1.sync import router as sync_router
 
 api_router = APIRouter()
 api_router.include_router(health_router)
+api_router.include_router(ai_router)
 api_router.include_router(companies_router)
+api_router.include_router(cv_router)
 api_router.include_router(dashboard_router)
 api_router.include_router(opportunities_router)
 api_router.include_router(search_policy_router)

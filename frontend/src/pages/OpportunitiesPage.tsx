@@ -1,6 +1,9 @@
 import { useState, type KeyboardEvent } from 'react'
 import { useSearchParams } from 'react-router'
-import type { OpportunityFeedName } from '../api/opportunities'
+import type {
+  OpportunityFeedName,
+  OpportunityFeedSort,
+} from '../api/opportunities'
 import { FeedList } from '../components/FeedList'
 import { PageHeader } from '../components/PageHeader'
 
@@ -14,6 +17,10 @@ function feedFromParam(value: string | null): OpportunityFeedName {
   return FEEDS.includes(value as OpportunityFeedName)
     ? (value as OpportunityFeedName)
     : 'main'
+}
+
+function sortFromParam(value: string | null): OpportunityFeedSort {
+  return value === 'best_fit' ? 'best_fit' : 'recent'
 }
 
 function pageFromParam(value: string | null): number {
@@ -40,6 +47,7 @@ export function OpportunitiesPage() {
 
   const feed = feedFromParam(searchParams.get('feed'))
   const page = pageFromParam(searchParams.get('page'))
+  const sortBy = sortFromParam(searchParams.get('sort'))
 
   function selectFeed(next: OpportunityFeedName) {
     if (next === feed) {
@@ -50,6 +58,23 @@ export function OpportunitiesPage() {
         const params = new URLSearchParams(current)
         params.set('feed', next)
         // Pagination is per bucket; page 3 of the main feed has no meaning here.
+        params.delete('page')
+        return params
+      },
+      { replace: true },
+    )
+  }
+
+  function changeSort(next: OpportunityFeedSort) {
+    setSearchParams(
+      (current) => {
+        const params = new URLSearchParams(current)
+        if (next === 'recent') {
+          params.delete('sort')
+        } else {
+          params.set('sort', next)
+        }
+        // A different order is a different page sequence.
         params.delete('page')
         return params
       },
@@ -142,10 +167,24 @@ export function OpportunitiesPage() {
         </button>
       </div>
 
+      <div className="feed-controls">
+        <label htmlFor="feed-sort">Sort</label>
+        <select
+          id="feed-sort"
+          className="settings-select"
+          value={sortBy}
+          onChange={(event) => changeSort(sortFromParam(event.target.value))}
+        >
+          <option value="recent">Newest first</option>
+          <option value="best_fit">Best Fit first</option>
+        </select>
+      </div>
+
       <FeedList
-        key={`feed:${feed}:page:${page}:token:${refreshToken}`}
+        key={`feed:${feed}:page:${page}:sort:${sortBy}:token:${refreshToken}`}
         feed={feed}
         page={page}
+        sortBy={sortBy}
         refreshToken={refreshToken}
         onPageChange={changePage}
         panelId={PANEL_ID}

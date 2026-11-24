@@ -1,5 +1,7 @@
+import { AISettingsSection } from '../components/AISettingsSection'
 import { CompanySources } from '../components/CompanySources'
 import { GoogleSheetsSettings } from '../components/GoogleSheetsSettings'
+import { MasterCVSection } from '../components/MasterCVSection'
 import { PageHeader } from '../components/PageHeader'
 import { TargetRolesSettings } from '../components/TargetRolesSettings'
 
@@ -13,6 +15,8 @@ export function SettingsPage() {
       <GoogleSheetsSettings />
       <TargetRolesSettings />
       <CompanySources />
+      <AISettingsSection />
+      <MasterCVSection />
     </>
   )
 }

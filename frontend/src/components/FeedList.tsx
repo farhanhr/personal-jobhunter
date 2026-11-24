@@ -1,4 +1,8 @@
-import { fetchOpportunityFeed, type OpportunityFeedName } from '../api/opportunities'
+import {
+  fetchOpportunityFeed,
+  type OpportunityFeedName,
+  type OpportunityFeedSort,
+} from '../api/opportunities'
 import { useLocation } from 'react-router'
 import { useResource } from '../hooks/useResource'
 import { OpportunityRow } from '../components/OpportunityRow'
@@ -41,6 +45,7 @@ function PageReport({
 type FeedListProps = {
   feed: OpportunityFeedName
   page: number
+  sortBy?: OpportunityFeedSort
   refreshToken?: number
   onPageChange: (page: number) => void
   /** The id the tab controls point at with `aria-controls`. */
@@ -61,6 +66,7 @@ type FeedListProps = {
 export function FeedList({
   feed,
   page,
+  sortBy = 'recent',
   refreshToken = 0,
   onPageChange,
   panelId,
@@ -71,8 +77,8 @@ export function FeedList({
   // bucket and page.
   const from = `${location.pathname}${location.search}`
   const { state, reload } = useResource(
-    (signal) => fetchOpportunityFeed({ feed, page, signal }),
-    `feed:${feed}:page:${page}:${refreshToken}`,
+    (signal) => fetchOpportunityFeed({ feed, page, sortBy, signal }),
+    `feed:${feed}:page:${page}:sort:${sortBy}:${refreshToken}`,
   )
 
   const loaded = state.status === 'loaded' ? state.data : null

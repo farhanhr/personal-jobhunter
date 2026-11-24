@@ -304,14 +304,6 @@ that runs a real round-trip against a disposable scratch spreadsheet. The defaul
 `uv run pytest` never contacts Google; treat your first sync against your own sheet as a
 supervised setup step.
 
-Still in progress: automatic spreadsheet creation (the Service Account cannot create one in
-the test project), carrying a full local read model into a blank spreadsheet, automatic
-search history in the sheet (there is no `Run_History` tab yet), and manual LinkedIn post
-import. The spreadsheet KPI strip and the optional `Metrics` board are companion views
-only; the app dashboard remains the place for operational state such as search limits, sync
-status, and target-role names. You can edit application-tracking fields in the app or in
-the sheet; the sheet stays canonical.
-
 ## Reporting a security issue
 
 Please do not open a public issue that contains personal data or credentials. See

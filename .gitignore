@@ -94,6 +94,7 @@ user-data-dir/
 # Local AI / agent development material (local-only)
 /docs/
 /AGENTS.md
+/HANDOFF.md
 /CLAUDE.md
 /GEMINI.md
 /.agents/
