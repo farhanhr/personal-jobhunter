@@ -152,7 +152,7 @@ def _start(settings: Settings) -> int:
 
     from personal_job_finder_api.main import create_app
 
-    uvicorn.run(create_app(issue_bootstrap_token=True), host="127.0.0.1", port=settings.port)
+    uvicorn.run(create_app(), host="127.0.0.1", port=settings.port)
     return 0
 
 

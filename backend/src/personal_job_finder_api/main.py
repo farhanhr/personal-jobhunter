@@ -14,7 +14,6 @@ from fastapi import FastAPI
 from sqlalchemy import Engine
 
 from personal_job_finder_api.api.errors import install_error_handlers
-from personal_job_finder_api.api.setup_session import SetupSessionStore
 from personal_job_finder_api.api.v1.router import api_router
 from personal_job_finder_api.core.config import Settings, settings
 from personal_job_finder_api.core.time import utc_now
@@ -40,7 +39,6 @@ def create_app(
     sync_transport_factory: Callable[[], SheetsTransport] | None = None,
     sync_transport: SheetsTransport | None = None,
     sync_spreadsheet_id: str | None = None,
-    issue_bootstrap_token: bool = False,
 ) -> FastAPI:
     resolved_settings = app_settings or settings
 
@@ -85,11 +83,6 @@ def create_app(
 
         try:
             recover_interrupted_runs(db_engine, now=clock())
-            if issue_bootstrap_token:
-                app.state.setup_sessions.issue_bootstrap(
-                    now=clock(),
-                    data_dir=resolved_settings.data_dir,
-                )
             yield
         finally:
             if owns_engine:
@@ -106,14 +99,13 @@ def create_app(
     app.state.sync_transport_factory = _transport_factory
     app.state.sync_spreadsheet_id = sync_spreadsheet_id
     app.state.clock = clock
-    app.state.setup_sessions = SetupSessionStore()
     if engine is not None:
         app.state.engine = engine
     app.include_router(api_router, prefix=resolved_settings.api_v1_prefix)
     return app
 
 
-app = create_app(issue_bootstrap_token=True)
+app = create_app()
 
 
 if __name__ == "__main__":

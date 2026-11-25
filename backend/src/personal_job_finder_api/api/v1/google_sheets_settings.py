@@ -1,8 +1,9 @@
 """Google Sheets setup API for the Settings UI.
 
-Credential and setup mutations require a local setup session created by exchanging
-the one-time bootstrap token (see ``api/setup_session.py``). Responses never include
-private key material, raw provider bodies, or the full spreadsheet URL/ID.
+Every route is restricted to loopback requests by ``validate_local_request``: the
+Host header must be allowed and state-changing requests need an allowed local
+Origin. There is no setup token to hunt for. Responses never include private key
+material, raw provider bodies, or the full spreadsheet URL/ID.
 """
 
 from __future__ import annotations
@@ -11,6 +12,7 @@ from typing import Any
 
 from fastapi import APIRouter, Depends, Request, Response
 from pydantic import BaseModel, Field
+from starlette.datastructures import UploadFile as StarletteUploadFile
 
 from personal_job_finder_api.api.errors import ApiError
 from personal_job_finder_api.api.security import validate_local_request
@@ -44,15 +46,9 @@ router = APIRouter(
 )
 
 MAX_KEY_BYTES = 64 * 1024
-SESSION_HEADER = "X-PJF-Setup-Token"
-SESSION_COOKIE = "pjf_setup_session"
 # Failures that mean the installed credential cannot use the spreadsheet. The
 # orchestration reports the same set, so both paths give the same guidance.
 ACCESS_ERROR_CODES = frozenset({"permission_denied", "spreadsheet_not_found", "reconnect_required"})
-
-
-class BootstrapExchange(BaseModel):
-    token: str = Field(min_length=10, max_length=200)
 
 
 class SetupRequest(BaseModel):
@@ -72,25 +68,6 @@ class IntegrationStatus(BaseModel):
     configured_via: str | None = None
     setup_completed_at: str | None = None
     configuration_error: str | None = None
-
-
-def _sessions(request: Request):
-    return request.app.state.setup_sessions
-
-
-def _require_session(request: Request) -> str:
-    """Return the CSRF digest for a live session or raise 401."""
-
-    cookie = request.cookies.get(SESSION_COOKIE)
-    csrf_header = request.headers.get(SESSION_HEADER)
-    now = request.app.state.clock()
-    if not _sessions(request).verify_csrf(cookie, csrf_header, now=now):
-        raise ApiError(
-            401,
-            "setup_session_required",
-            "Enter the local setup token shown in the server's data folder to continue.",
-        )
-    return cookie or ""
 
 
 def _status(request: Request) -> IntegrationStatus:
@@ -171,32 +148,6 @@ def get_status(request: Request, response: Response) -> IntegrationStatus:
     return _status(request)
 
 
-@router.post("/session", response_model=dict[str, Any])
-def exchange_bootstrap(
-    payload: BootstrapExchange, request: Request, response: Response
-) -> dict[str, Any]:
-    """Exchange the one-time local token for a session cookie and CSRF token."""
-
-    data_dir = request.app.state.settings.data_dir
-    issued = _sessions(request).exchange_bootstrap(
-        payload.token,
-        now=request.app.state.clock(),
-        data_dir=data_dir,
-    )
-    if issued is None:
-        raise ApiError(401, "bootstrap_invalid", "The setup token is invalid or has expired.")
-    response.set_cookie(
-        SESSION_COOKIE,
-        issued.cookie_value,
-        httponly=True,
-        samesite="strict",
-        path="/api/v1/integrations/google-sheets",
-        max_age=8 * 60 * 60,
-    )
-    response.headers["Cache-Control"] = "no-store"
-    return {"csrf_token": issued.csrf_token, "expires_at": issued.expires_at.isoformat()}
-
-
 def _revalidate_access(request: Request, spreadsheet_id: str) -> None:
     """Read-only check that the installed credential can open the spreadsheet.
 
@@ -256,15 +207,32 @@ def _revalidate_after_replacement(request: Request, email: str) -> ApiError | No
     return None
 
 
-@router.put("/service-account", response_model=IntegrationStatus)
-async def replace_service_account(request: Request, response: Response) -> IntegrationStatus:
-    _require_session(request)
-    raw = await request.body()
+async def _read_key_upload(request: Request) -> bytes:
+    """Return the uploaded key bytes from raw JSON or multipart form data."""
+
+    content_type = request.headers.get("content-type", "")
+    if content_type.startswith("multipart/form-data"):
+        form = await request.form()
+        upload = form.get("file")
+        if not isinstance(upload, StarletteUploadFile):
+            raise ApiError(
+                422,
+                "key_missing",
+                "Choose the Service Account JSON file first.",
+            )
+        raw = await upload.read(MAX_KEY_BYTES + 1)
+    elif content_type.startswith("application/json"):
+        raw = await request.body()
+    else:
+        raise ApiError(415, "unsupported_media_type", "Upload the JSON key file.")
     if len(raw) > MAX_KEY_BYTES:
         raise ApiError(413, "key_too_large", "The uploaded key is larger than 64 KB.")
-    content_type = request.headers.get("content-type", "")
-    if not content_type.startswith("application/json"):
-        raise ApiError(415, "unsupported_media_type", "Upload the JSON key file.")
+    return raw
+
+
+@router.put("/service-account", response_model=IntegrationStatus)
+async def replace_service_account(request: Request, response: Response) -> IntegrationStatus:
+    raw = await _read_key_upload(request)
     try:
         key = parse_service_account_key(raw)
         save_service_account_key(request.app.state.settings, key)
@@ -304,7 +272,6 @@ def save_and_setup(
     response: Response,
     payload: SetupRequest | None = None,
 ) -> dict[str, Any]:
-    _require_session(request)
     result = run_setup(
         request.app.state.settings,
         request.app.state.engine,
@@ -340,7 +307,6 @@ def save_and_setup(
 
 @router.delete("/service-account", response_model=IntegrationStatus)
 def disconnect(request: Request, response: Response) -> IntegrationStatus:
-    _require_session(request)
     try:
         delete_service_account_key(request.app.state.settings)
     except GoogleSheetsError as error:

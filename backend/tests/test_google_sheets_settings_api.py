@@ -22,6 +22,7 @@ from personal_job_finder_api.main import create_app
 
 NOW = datetime(2026, 11, 21, 12, 0, tzinfo=UTC)
 ORIGIN = "http://127.0.0.1:5173"
+ORIGIN_HEADERS = {"Origin": ORIGIN}
 SYNTHETIC_URL = "https://docs.google.com/spreadsheets/d/1SyntheticSheetId0123456789abcdefXYZ/edit"
 FAKE_KEY = "-----BEGIN PRIVATE KEY-----\nfake-not-real\n-----END PRIVATE KEY-----\n"
 EMAIL = "pjf-reader@pjf-test-project.iam.gserviceaccount.com"
@@ -60,17 +61,10 @@ def client(engine: Engine, tmp_path: Path, key_path: Path) -> TestClient:
     return TestClient(app, base_url="http://127.0.0.1:8000")
 
 
-def _bootstrap(client: TestClient) -> dict[str, str]:
-    token = client.app.state.setup_sessions.issue_bootstrap(
-        now=NOW, data_dir=client.app.state.settings.data_dir
-    )
-    response = client.post(
-        "/api/v1/integrations/google-sheets/session",
-        json={"token": token},
-        headers={"Origin": ORIGIN},
-    )
-    assert response.status_code == 200, response.text
-    return {"X-PJF-Setup-Token": response.json()["csrf_token"], "Origin": ORIGIN}
+def _bootstrap_headers() -> dict[str, str]:
+    """State-changing requests only need the local browser Origin."""
+
+    return dict(ORIGIN_HEADERS)
 
 
 def test_status_surfaces_an_invalid_environment_spreadsheet_url(
@@ -107,38 +101,50 @@ def test_status_starts_not_configured_and_never_leaks_key_text(client: TestClien
     assert "PRIVATE KEY" not in response.text
 
 
-def test_mutation_without_session_is_rejected(client: TestClient) -> None:
-    response = client.post(
-        "/api/v1/integrations/google-sheets/setup",
-        json={"spreadsheet_url": SYNTHETIC_URL},
-        headers={"Origin": ORIGIN},
+def test_direct_upload_without_a_setup_token_is_accepted(
+    client: TestClient, key_path: Path
+) -> None:
+    """Loopback Origin validation replaces the old setup-token exchange."""
+
+    response = client.put(
+        "/api/v1/integrations/google-sheets/service-account",
+        content=_key_bytes(),
+        headers={**ORIGIN_HEADERS, "Content-Type": "application/json"},
     )
 
-    assert response.status_code == 401
-    assert response.json()["error"]["code"] == "setup_session_required"
+    assert response.status_code == 200, response.text
+    assert response.json()["service_account_email"] == EMAIL
+    assert key_path.exists()
 
 
-def test_bootstrap_token_is_single_use(client: TestClient) -> None:
-    token = client.app.state.setup_sessions.issue_bootstrap(
-        now=NOW, data_dir=client.app.state.settings.data_dir
-    )
-    first = client.post(
-        "/api/v1/integrations/google-sheets/session",
-        json={"token": token},
-        headers={"Origin": ORIGIN},
-    )
-    second = client.post(
-        "/api/v1/integrations/google-sheets/session",
-        json={"token": token},
-        headers={"Origin": ORIGIN},
+def test_multipart_upload_accepts_the_downloaded_json_file(
+    client: TestClient, key_path: Path
+) -> None:
+    response = client.put(
+        "/api/v1/integrations/google-sheets/service-account",
+        files={"file": ("example-project-key.json", _key_bytes(), "application/json")},
+        headers=ORIGIN_HEADERS,
     )
 
-    assert first.status_code == 200
-    assert second.status_code == 401
+    assert response.status_code == 200, response.text
+    assert response.json()["service_account_email"] == EMAIL
+    assert [path.name for path in key_path.parent.iterdir()] == ["google-service-account.json"]
+    assert stat.S_IMODE(key_path.stat().st_mode) == 0o600
+
+
+def test_multipart_upload_without_a_file_is_rejected(client: TestClient) -> None:
+    response = client.put(
+        "/api/v1/integrations/google-sheets/service-account",
+        files={"unrelated": (None, "value")},
+        headers=ORIGIN_HEADERS,
+    )
+
+    assert response.status_code == 422
+    assert response.json()["error"]["code"] == "key_missing"
 
 
 def test_mutation_with_wrong_origin_is_rejected(client: TestClient) -> None:
-    headers = _bootstrap(client)
+    headers = _bootstrap_headers()
     response = client.post(
         "/api/v1/integrations/google-sheets/setup",
         json={"spreadsheet_url": SYNTHETIC_URL},
@@ -149,7 +155,7 @@ def test_mutation_with_wrong_origin_is_rejected(client: TestClient) -> None:
 
 
 def test_upload_rejects_non_json_content_type(client: TestClient) -> None:
-    headers = _bootstrap(client)
+    headers = _bootstrap_headers()
     response = client.put(
         "/api/v1/integrations/google-sheets/service-account",
         content=_key_bytes(),
@@ -160,7 +166,7 @@ def test_upload_rejects_non_json_content_type(client: TestClient) -> None:
 
 
 def test_upload_rejects_oversized_body(client: TestClient) -> None:
-    headers = _bootstrap(client)
+    headers = _bootstrap_headers()
     response = client.put(
         "/api/v1/integrations/google-sheets/service-account",
         content=b" " * (64 * 1024 + 1),
@@ -173,7 +179,7 @@ def test_upload_rejects_oversized_body(client: TestClient) -> None:
 def test_upload_stores_key_and_response_has_only_public_fields(
     client: TestClient, key_path: Path
 ) -> None:
-    headers = _bootstrap(client)
+    headers = _bootstrap_headers()
     response = client.put(
         "/api/v1/integrations/google-sheets/service-account",
         content=_key_bytes(),
@@ -189,7 +195,7 @@ def test_upload_stores_key_and_response_has_only_public_fields(
 
 
 def test_oauth_client_upload_is_rejected_with_actionable_error(client: TestClient) -> None:
-    headers = _bootstrap(client)
+    headers = _bootstrap_headers()
     oauth = json.dumps({"installed": {"client_id": "x", "client_secret": "y"}}).encode()
     response = client.put(
         "/api/v1/integrations/google-sheets/service-account",
@@ -206,7 +212,7 @@ def test_upload_ignores_the_uploaded_filename_and_stores_one_canonical_credentia
 ) -> None:
     """The Google Cloud download name must never become a second credential file."""
 
-    headers = _bootstrap(client)
+    headers = _bootstrap_headers()
     response = client.put(
         "/api/v1/integrations/google-sheets/service-account",
         content=_key_bytes(),
@@ -230,7 +236,7 @@ def test_upload_with_a_path_like_filename_cannot_escape_the_credentials_director
 ) -> None:
     """A user-controlled filename must never influence the destination path."""
 
-    headers = _bootstrap(client)
+    headers = _bootstrap_headers()
     response = client.put(
         "/api/v1/integrations/google-sheets/service-account",
         content=_key_bytes(),
@@ -250,7 +256,7 @@ def test_upload_with_a_path_like_filename_cannot_escape_the_credentials_director
 def test_upload_keeps_the_credentials_directory_private(client: TestClient, key_path: Path) -> None:
     """The upload path must keep the directory at 0700 and the file at 0600."""
 
-    headers = _bootstrap(client)
+    headers = _bootstrap_headers()
     response = client.put(
         "/api/v1/integrations/google-sheets/service-account",
         content=_key_bytes(),
@@ -265,7 +271,7 @@ def test_upload_keeps_the_credentials_directory_private(client: TestClient, key_
 def test_replacing_the_key_overwrites_the_canonical_file_without_a_second_credential(
     client: TestClient, key_path: Path
 ) -> None:
-    headers = _bootstrap(client)
+    headers = _bootstrap_headers()
     first = client.put(
         "/api/v1/integrations/google-sheets/service-account",
         content=_key_bytes(),
@@ -288,7 +294,7 @@ def test_replacing_the_key_overwrites_the_canonical_file_without_a_second_creden
 def test_invalid_json_leaves_the_installed_credential_untouched(
     client: TestClient, key_path: Path
 ) -> None:
-    headers = _bootstrap(client)
+    headers = _bootstrap_headers()
     client.put(
         "/api/v1/integrations/google-sheets/service-account",
         content=_key_bytes(),
@@ -310,7 +316,7 @@ def test_invalid_json_leaves_the_installed_credential_untouched(
 def test_oauth_client_upload_leaves_the_installed_credential_untouched(
     client: TestClient, key_path: Path
 ) -> None:
-    headers = _bootstrap(client)
+    headers = _bootstrap_headers()
     client.put(
         "/api/v1/integrations/google-sheets/service-account",
         content=_key_bytes(),
@@ -347,7 +353,7 @@ def test_replacement_revalidates_access_and_clears_readiness_when_the_sheet_is_n
     """A new identity that cannot open the sheet must not inherit the old readiness."""
 
     _ready_workspace(engine)
-    headers = _bootstrap(client)
+    headers = _bootstrap_headers()
 
     def denied(request: object, spreadsheet_id: str) -> None:
         raise GoogleSheetsError(
@@ -379,7 +385,7 @@ def test_replacement_that_reaches_the_sheet_keeps_the_workspace_ready(
     client: TestClient, engine: Engine, key_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     _ready_workspace(engine)
-    headers = _bootstrap(client)
+    headers = _bootstrap_headers()
     checked: list[str] = []
 
     def allowed(request: object, spreadsheet_id: str) -> None:
@@ -427,7 +433,7 @@ def test_revalidation_reads_the_configured_sheet_without_writing(
             return {"valueRanges": [{"values": []} for _ in ranges]}
 
     _ready_workspace(engine)
-    headers = _bootstrap(client)
+    headers = _bootstrap_headers()
     transport = RecordingTransport()
     monkeypatch.setattr(client.app.state, "sync_transport_factory", lambda: transport)
 
@@ -443,7 +449,7 @@ def test_revalidation_reads_the_configured_sheet_without_writing(
 
 
 def test_spreadsheet_url_is_validated_and_not_echoed(client: TestClient) -> None:
-    headers = _bootstrap(client)
+    headers = _bootstrap_headers()
     client.put(
         "/api/v1/integrations/google-sheets/service-account",
         content=_key_bytes(),
@@ -461,7 +467,7 @@ def test_spreadsheet_url_is_validated_and_not_echoed(client: TestClient) -> None
 
 
 def test_removed_spreadsheet_put_endpoint_is_gone(client: TestClient) -> None:
-    headers = _bootstrap(client)
+    headers = _bootstrap_headers()
     response = client.put(
         "/api/v1/integrations/google-sheets/spreadsheet",
         json={"spreadsheet_url": SYNTHETIC_URL},
@@ -474,7 +480,7 @@ def test_removed_spreadsheet_put_endpoint_is_gone(client: TestClient) -> None:
 def test_status_reports_onboarding_until_setup_completes(
     client: TestClient, key_path: Path
 ) -> None:
-    headers = _bootstrap(client)
+    headers = _bootstrap_headers()
     before = client.get("/api/v1/integrations/google-sheets/status").json()
     assert before["workspace_ready"] is False
     assert before["onboarding_required"] is True
@@ -513,7 +519,7 @@ def test_status_stays_ready_when_the_key_is_removed(
 
 
 def test_save_and_setup_reports_missing_key_without_traceback(client: TestClient) -> None:
-    headers = _bootstrap(client)
+    headers = _bootstrap_headers()
     response = client.post("/api/v1/integrations/google-sheets/setup", headers=headers)
 
     assert response.status_code == 200
@@ -526,7 +532,7 @@ def test_save_and_setup_reports_missing_key_without_traceback(client: TestClient
 def test_save_and_setup_calls_shared_orchestration(
     client: TestClient, key_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    headers = _bootstrap(client)
+    headers = _bootstrap_headers()
     client.put(
         "/api/v1/integrations/google-sheets/service-account",
         content=_key_bytes(),
@@ -561,7 +567,7 @@ def test_save_and_setup_calls_shared_orchestration(
 def test_save_and_setup_accepts_no_body(
     client: TestClient, key_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    headers = _bootstrap(client)
+    headers = _bootstrap_headers()
     client.put(
         "/api/v1/integrations/google-sheets/service-account",
         content=_key_bytes(),
@@ -591,7 +597,7 @@ def test_save_and_setup_accepts_no_body(
 def test_incompatible_workspace_returns_conflict(
     client: TestClient, key_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    headers = _bootstrap(client)
+    headers = _bootstrap_headers()
     client.put(
         "/api/v1/integrations/google-sheets/service-account",
         content=_key_bytes(),
@@ -621,7 +627,7 @@ def test_incompatible_workspace_returns_conflict(
 
 
 def test_disconnect_removes_the_key(client: TestClient, key_path: Path) -> None:
-    headers = _bootstrap(client)
+    headers = _bootstrap_headers()
     client.put(
         "/api/v1/integrations/google-sheets/service-account",
         content=_key_bytes(),
