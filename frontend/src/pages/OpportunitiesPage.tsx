@@ -1,5 +1,6 @@
-import { useState, type KeyboardEvent } from 'react'
-import { useSearchParams } from 'react-router'
+import { useEffect, useState, type KeyboardEvent } from 'react'
+import { Link, useSearchParams } from 'react-router'
+import { fetchAISettings } from '../api/aiSettings'
 import type {
   OpportunityFeedName,
   OpportunityFeedSort,
@@ -44,10 +45,26 @@ function pageFromParam(value: string | null): number {
 export function OpportunitiesPage() {
   const [searchParams, setSearchParams] = useSearchParams()
   const [refreshToken, setRefreshToken] = useState(0)
+  const [aiConfigured, setAiConfigured] = useState<boolean | null>(null)
 
   const feed = feedFromParam(searchParams.get('feed'))
   const page = pageFromParam(searchParams.get('page'))
   const sortBy = sortFromParam(searchParams.get('sort'))
+  const bestFitLocked = aiConfigured === false
+
+  useEffect(() => {
+    const controller = new AbortController()
+    fetchAISettings(controller.signal)
+      .then((settings) => setAiConfigured(settings.is_configured))
+      .catch(() => {
+        // A failed probe must not remove sorting: the feed keeps working and
+        // the backend still accepts the best-fit order.
+        if (!controller.signal.aborted) {
+          setAiConfigured(null)
+        }
+      })
+    return () => controller.abort()
+  }, [])
 
   function selectFeed(next: OpportunityFeedName) {
     if (next === feed) {
@@ -169,16 +186,41 @@ export function OpportunitiesPage() {
 
       <div className="feed-controls">
         <label htmlFor="feed-sort">Sort</label>
-        <select
-          id="feed-sort"
-          className="settings-select"
-          value={sortBy}
-          onChange={(event) => changeSort(sortFromParam(event.target.value))}
+        <span
+          className="feed-sort-wrap"
+          title={
+            bestFitLocked
+              ? 'Configure AI in Settings to unlock Best Fit ranking'
+              : undefined
+          }
         >
-          <option value="recent">Newest first</option>
-          <option value="best_fit">Best Fit first</option>
-        </select>
+          <select
+            id="feed-sort"
+            className="settings-select"
+            value={sortBy}
+            aria-describedby={bestFitLocked ? 'best-fit-hint' : undefined}
+            onChange={(event) => changeSort(sortFromParam(event.target.value))}
+          >
+            <option value="recent">Newest first</option>
+            <option
+              value="best_fit"
+              disabled={bestFitLocked}
+              title={
+                bestFitLocked
+                  ? 'Configure AI in Settings to unlock Best Fit ranking'
+                  : undefined
+              }
+            >
+              Best Fit first
+            </option>
+          </select>
+        </span>
       </div>
+      {bestFitLocked ? (
+        <p id="best-fit-hint" className="field-hint">
+          Configure AI in <Link to="/settings">Settings</Link> to unlock Best Fit ranking.
+        </p>
+      ) : null}
 
       <FeedList
         key={`feed:${feed}:page:${page}:sort:${sortBy}:token:${refreshToken}`}

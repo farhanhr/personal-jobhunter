@@ -1,5 +1,6 @@
 import { render, screen } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
+import { MemoryRouter } from 'react-router'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import type { OpportunityDetail } from '../api/opportunities'
 import { FitAnalysisSection } from './FitAnalysisSection'
@@ -54,6 +55,52 @@ function mockResponse(body: unknown, status = 200): Response {
   } as Response
 }
 
+const aiConfigured = {
+  provider: 'groq',
+  base_url: 'https://api.groq.com/openai/v1',
+  api_key_masked: '••••••••',
+  model: 'llama-3.3-70b-versatile',
+  is_configured: true,
+  updated_at_utc: '2026-11-24T10:00:00.000000Z',
+}
+
+const aiUnconfigured = {
+  provider: 'groq',
+  base_url: '',
+  api_key_masked: null,
+  model: 'llama-3.3-70b-versatile',
+  is_configured: false,
+  updated_at_utc: null,
+}
+
+const cvUploaded = {
+  has_profile: true,
+  profile: {
+    contact_info: {
+      full_name: 'Synthetic Candidate',
+      email: null,
+      phone: null,
+      location: null,
+      linkedin_url: null,
+      portfolio_url: null,
+    },
+    summary: '',
+    skills: { hard_skills: [], tools: [], soft_skills: [] },
+    experience: [],
+    education: [],
+    projects: [],
+  },
+  file_name: 'synthetic-cv.pdf',
+  updated_at_utc: '2026-11-24T10:00:00.000000Z',
+}
+
+const cvMissing = {
+  has_profile: false,
+  profile: null,
+  file_name: null,
+  updated_at_utc: null,
+}
+
 const fitResult = {
   opportunity_id: 'opp_1',
   candidate_fit_score: 92,
@@ -68,6 +115,36 @@ const fitResult = {
   evaluated_at_utc: '2026-11-24T11:00:00.000000Z',
 }
 
+type Handlers = {
+  settings?: () => Response
+  cv?: () => Response
+  analyze?: () => Response
+}
+
+function mockApi(handlers: Handlers = {}) {
+  return vi.fn((input: RequestInfo | URL) => {
+    const url = String(input)
+    if (url === '/api/v1/ai/settings') {
+      return Promise.resolve(handlers.settings?.() ?? mockResponse(aiConfigured))
+    }
+    if (url === '/api/v1/cv/profile') {
+      return Promise.resolve(handlers.cv?.() ?? mockResponse(cvUploaded))
+    }
+    if (url.endsWith('/analyze-fit')) {
+      return Promise.resolve(handlers.analyze?.() ?? mockResponse(fitResult))
+    }
+    return Promise.reject(new Error(`Unexpected request: ${url}`))
+  })
+}
+
+function renderSection(overrides: Partial<OpportunityDetail> = {}) {
+  return render(
+    <MemoryRouter>
+      <FitAnalysisSection detail={detail(overrides)} />
+    </MemoryRouter>,
+  )
+}
+
 describe('FitAnalysisSection', () => {
   afterEach(() => {
     vi.unstubAllGlobals()
@@ -75,7 +152,7 @@ describe('FitAnalysisSection', () => {
   })
 
   it('shows an analyze action when nothing is cached', () => {
-    render(<FitAnalysisSection detail={detail()} />)
+    renderSection()
 
     expect(screen.getByText(/not analyzed yet/i)).toBeInTheDocument()
     expect(
@@ -87,16 +164,12 @@ describe('FitAnalysisSection', () => {
     const fetchMock = vi.fn()
     vi.stubGlobal('fetch', fetchMock)
 
-    render(
-      <FitAnalysisSection
-        detail={detail({
-          candidate_fit_score: 92,
-          candidate_fit_summary: fitResult.summary,
-          candidate_fit_evaluated_at: fitResult.evaluated_at_utc,
-          is_best_fit: true,
-        })}
-      />,
-    )
+    renderSection({
+      candidate_fit_score: 92,
+      candidate_fit_summary: fitResult.summary,
+      candidate_fit_evaluated_at: fitResult.evaluated_at_utc,
+      is_best_fit: true,
+    })
 
     expect(screen.getByText('⭐ Best Fit (92%)')).toBeInTheDocument()
     expect(screen.getByText('Strong Match')).toBeInTheDocument()
@@ -111,12 +184,12 @@ describe('FitAnalysisSection', () => {
     expect(fetchMock).not.toHaveBeenCalled()
   })
 
-  it('analyzes on request and shows the result', async () => {
+  it('analyzes on request when AI and the Master CV are configured', async () => {
     const user = userEvent.setup()
-    const fetchMock = vi.fn().mockResolvedValue(mockResponse(fitResult))
+    const fetchMock = mockApi()
     vi.stubGlobal('fetch', fetchMock)
 
-    render(<FitAnalysisSection detail={detail()} />)
+    renderSection()
     await user.click(screen.getByRole('button', { name: 'Analyze Fit' }))
 
     expect(await screen.findByText('⭐ Best Fit (92%)')).toBeInTheDocument()
@@ -125,30 +198,81 @@ describe('FitAnalysisSection', () => {
       screen.getByRole('button', { name: 'Re-analyze Fit' }),
     ).toBeInTheDocument()
 
-    const [url, init] = fetchMock.mock.calls[0] as [string, RequestInit]
-    expect(url).toBe('/api/v1/opportunities/opp_1/analyze-fit')
-    expect(init.method).toBe('POST')
+    const analyze = fetchMock.mock.calls.find(([input]) =>
+      String(input).endsWith('/analyze-fit'),
+    ) as [RequestInfo | URL, RequestInit] | undefined
+    expect(String(analyze?.[0])).toBe('/api/v1/opportunities/opp_1/analyze-fit')
+    expect(analyze?.[1].method).toBe('POST')
+  })
+
+  it('opens the unlock modal instead of calling the AI endpoint when unconfigured', async () => {
+    const user = userEvent.setup()
+    const fetchMock = mockApi({
+      settings: () => mockResponse(aiUnconfigured),
+      cv: () => mockResponse(cvMissing),
+    })
+    vi.stubGlobal('fetch', fetchMock)
+
+    renderSection()
+    await user.click(screen.getByRole('button', { name: 'Analyze Fit' }))
+
+    const dialog = await screen.findByRole('dialog', {
+      name: /unlock candidate fit & tailored ats cv/i,
+    })
+    expect(dialog).toBeInTheDocument()
+    expect(screen.getByText('Not Configured')).toBeInTheDocument()
+    expect(screen.getByText('Not Uploaded')).toBeInTheDocument()
+    expect(screen.getByRole('link', { name: 'Go to Settings' })).toHaveAttribute(
+      'href',
+      '/settings',
+    )
+    expect(
+      fetchMock.mock.calls.some(([input]) => String(input).endsWith('/analyze-fit')),
+    ).toBe(false)
+  })
+
+  it('opens the unlock modal from Tailor CV when the Master CV is missing', async () => {
+    const user = userEvent.setup()
+    vi.stubGlobal(
+      'fetch',
+      mockApi({
+        settings: () => mockResponse(aiConfigured),
+        cv: () => mockResponse(cvMissing),
+      }),
+    )
+
+    renderSection()
+    await user.click(screen.getByRole('button', { name: 'Tailor CV' }))
+
+    expect(
+      await screen.findByRole('dialog', {
+        name: /unlock candidate fit & tailored ats cv/i,
+      }),
+    ).toBeInTheDocument()
+    expect(screen.getByText('Configured')).toBeInTheDocument()
+    expect(screen.getByText('Not Uploaded')).toBeInTheDocument()
   })
 
   it('shows the actionable error when the master CV is missing', async () => {
     const user = userEvent.setup()
     vi.stubGlobal(
       'fetch',
-      vi.fn().mockResolvedValue(
-        mockResponse(
-          {
-            error: {
-              code: 'candidate_profile_missing',
-              message:
-                'Please upload your Master CV in Settings before analyzing fit.',
+      mockApi({
+        analyze: () =>
+          mockResponse(
+            {
+              error: {
+                code: 'candidate_profile_missing',
+                message:
+                  'Please upload your Master CV in Settings before analyzing fit.',
+              },
             },
-          },
-          400,
-        ),
-      ),
+            400,
+          ),
+      }),
     )
 
-    render(<FitAnalysisSection detail={detail()} />)
+    renderSection()
     await user.click(screen.getByRole('button', { name: 'Analyze Fit' }))
 
     expect(

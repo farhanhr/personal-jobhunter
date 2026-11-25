@@ -1,4 +1,6 @@
 import { useState } from 'react'
+import { fetchAISettings } from '../api/aiSettings'
+import { fetchCVProfile } from '../api/cvProfile'
 import {
   analyzeFit,
   type OpportunityDetail,
@@ -7,6 +9,7 @@ import {
 import { formatJakartaInstant } from '../lib/datetime'
 import { fitBadgeClass, fitBadgeText, fitTier } from '../lib/fitLabels'
 import { TailoredCVModal } from './TailoredCVModal'
+import { UnlockAIModal, type AIUnlockStatus } from './UnlockAIModal'
 
 type AnalyzeState =
   | { status: 'idle' }
@@ -27,11 +30,66 @@ export function FitAnalysisSection({ detail }: { detail: OpportunityDetail }) {
   const [result, setResult] = useState<OpportunityFitResult | null>(null)
   const [state, setState] = useState<AnalyzeState>({ status: 'idle' })
   const [isTailorOpen, setIsTailorOpen] = useState(false)
+  const [aiAccess, setAiAccess] = useState<AIUnlockStatus | null>(null)
+  const [unlockStatus, setUnlockStatus] = useState<AIUnlockStatus | null>(null)
+  const [isChecking, setIsChecking] = useState(false)
 
   const score = result?.candidate_fit_score ?? detail.candidate_fit_score
   const summary = result?.summary ?? detail.candidate_fit_summary
   const evaluatedAt = result?.evaluated_at_utc ?? detail.candidate_fit_evaluated_at
   const isAnalyzing = state.status === 'analyzing'
+
+  /**
+   * Read the optional AI prerequisites once per page visit. A failed check
+   * returns null and lets the AI endpoint report its own actionable error, so
+   * a settings read never blocks an otherwise valid action.
+   */
+  async function resolveAIAccess(): Promise<AIUnlockStatus | null> {
+    if (aiAccess !== null) {
+      return aiAccess
+    }
+    try {
+      const [settings, profile] = await Promise.all([
+        fetchAISettings(),
+        fetchCVProfile(),
+      ])
+      const access = {
+        aiConfigured: settings.is_configured,
+        cvUploaded: profile.has_profile,
+      }
+      setAiAccess(access)
+      return access
+    } catch {
+      return null
+    }
+  }
+
+  async function requestAIAccess(): Promise<boolean> {
+    setIsChecking(true)
+    try {
+      const access = await resolveAIAccess()
+      if (access !== null && (!access.aiConfigured || !access.cvUploaded)) {
+        setUnlockStatus(access)
+        return false
+      }
+      return true
+    } finally {
+      setIsChecking(false)
+    }
+  }
+
+  async function handleAnalyze() {
+    if (!(await requestAIAccess())) {
+      return
+    }
+    await runAnalysis()
+  }
+
+  async function handleTailor() {
+    if (await requestAIAccess()) {
+      setIsTailorOpen(true)
+    }
+  }
 
   async function runAnalysis() {
     setState({ status: 'analyzing' })
@@ -127,8 +185,8 @@ export function FitAnalysisSection({ detail }: { detail: OpportunityDetail }) {
         <button
           type="button"
           className="button-primary"
-          onClick={() => void runAnalysis()}
-          disabled={isAnalyzing}
+          onClick={() => void handleAnalyze()}
+          disabled={isAnalyzing || isChecking}
         >
           {isAnalyzing
             ? 'Analyzing…'
@@ -139,7 +197,8 @@ export function FitAnalysisSection({ detail }: { detail: OpportunityDetail }) {
         <button
           type="button"
           className="button-secondary"
-          onClick={() => setIsTailorOpen(true)}
+          onClick={() => void handleTailor()}
+          disabled={isAnalyzing || isChecking}
         >
           Tailor CV
         </button>
@@ -149,6 +208,13 @@ export function FitAnalysisSection({ detail }: { detail: OpportunityDetail }) {
         <TailoredCVModal
           opportunityId={detail.opportunity_id}
           onClose={() => setIsTailorOpen(false)}
+        />
+      )}
+
+      {unlockStatus !== null && (
+        <UnlockAIModal
+          status={unlockStatus}
+          onClose={() => setUnlockStatus(null)}
         />
       )}
 

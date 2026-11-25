@@ -83,9 +83,26 @@ function feedPage(overrides: Record<string, unknown> = {}): OpportunityFeedPage 
 
 type BucketCounts = { main?: number; review?: number }
 
-function mockApi(counts: BucketCounts = { main: 1, review: 0 }) {
+function aiSettings(configured: boolean) {
+  return {
+    provider: 'groq',
+    base_url: configured ? 'https://api.groq.com/openai/v1' : '',
+    api_key_masked: configured ? '••••••••' : null,
+    model: 'llama-3.3-70b-versatile',
+    is_configured: configured,
+    updated_at_utc: configured ? '2026-11-24T10:00:00.000000Z' : null,
+  }
+}
+
+function mockApi(
+  counts: BucketCounts = { main: 1, review: 0 },
+  options: { aiConfigured?: boolean } = {},
+) {
   return vi.fn((input: RequestInfo | URL) => {
     const url = new URL(String(input), 'http://127.0.0.1')
+    if (url.pathname === '/api/v1/ai/settings') {
+      return Promise.resolve(mockResponse(aiSettings(options.aiConfigured ?? true)))
+    }
     const feed = url.searchParams.get('feed')
     const page = Number(url.searchParams.get('page') ?? '1')
     const bucket = feed as 'main' | 'review'
@@ -179,7 +196,9 @@ describe('OpportunitiesPage', () => {
 
     await screen.findByText('26–30 of 30, page 2 of 2.')
     expect(
-      fetchMock.mock.calls.every(([input]) => String(input).includes('feed=main')),
+      fetchMock.mock.calls
+        .filter(([input]) => String(input).includes('/api/v1/jobs'))
+        .every(([input]) => String(input).includes('feed=main')),
     ).toBe(true)
 
     await userEvent.click(screen.getByRole('tab', { name: 'Review queue' }))
@@ -385,6 +404,35 @@ describe('OpportunitiesPage', () => {
     expect(screen.queryByRole('searchbox')).not.toBeInTheDocument()
     expect(screen.getByLabelText('Sort')).toBeInTheDocument()
     expect(screen.getByText('1–2 of 2, page 1 of 1.')).toBeInTheDocument()
+  })
+
+  it('disables Best Fit and explains how to unlock it when AI is not configured', async () => {
+    vi.stubGlobal('fetch', mockApi(undefined, { aiConfigured: false }))
+
+    renderPage()
+
+    await waitFor(() =>
+      expect(screen.getByRole('option', { name: 'Best Fit first' })).toBeDisabled(),
+    )
+    expect(document.getElementById('best-fit-hint')?.textContent).toContain(
+      'Configure AI in Settings to unlock Best Fit ranking',
+    )
+    expect(screen.getByRole('link', { name: 'Settings' })).toHaveAttribute(
+      'href',
+      '/settings',
+    )
+  })
+
+  it('keeps Best Fit selectable when AI is configured', async () => {
+    vi.stubGlobal('fetch', mockApi(undefined, { aiConfigured: true }))
+
+    renderPage()
+
+    await screen.findByText('Data Analyst')
+    await waitFor(() =>
+      expect(screen.getByRole('option', { name: 'Best Fit first' })).toBeEnabled(),
+    )
+    expect(document.getElementById('best-fit-hint')).not.toBeInTheDocument()
   })
 })
 
