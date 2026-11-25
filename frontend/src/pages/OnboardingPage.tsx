@@ -5,24 +5,19 @@ import { useResource } from '../hooks/useResource'
 
 const STEPS = [
   {
-    title: 'Create a Service Account key',
+    title: 'Upload your Service Account JSON',
     detail:
-      'In Google Cloud, enable the Google Sheets API and download one JSON key for a Service Account. No Google sign-in is used.',
+      'Open Settings → Google Sheets and choose the JSON key you downloaded from Google Cloud. It is stored only on this computer.',
   },
   {
-    title: 'Share the spreadsheet',
+    title: 'Paste your Google Sheet link',
     detail:
-      'Share one spreadsheet with the Service Account email as Editor. An empty spreadsheet or one this app used before both work.',
+      'Share the spreadsheet with the Service Account email as Editor, paste the link, then click Save & Connect Workspace.',
   },
   {
-    title: 'Validate and prepare',
+    title: 'Start discovering jobs',
     detail:
-      'Save & Setup checks access, recognizes the workspace, and creates only what is missing. An incompatible sheet is never modified.',
-  },
-  {
-    title: 'Start using the dashboard',
-    detail:
-      'Existing rows are refreshed into the app, and new rows append below them.',
+      'Add one to three target roles and enable the company sources you trust. Then run your first search from the dashboard.',
   },
 ]
 
@@ -37,12 +32,12 @@ export function OnboardingPage() {
     <>
       <PageHeader
         title="Set up your job workspace"
-        description="Google Sheets is required: it stores your opportunities and stays in sync with this app."
+        description="Three short steps: connect a Google Sheet, then let the app collect jobs for you."
       />
 
       <section className="settings-panel" aria-labelledby="onboarding-steps">
         <h2 id="onboarding-steps" className="text-lg font-semibold">
-          Four steps
+          Three steps
         </h2>
         <ol className="space-y-3">
           {STEPS.map((step, index) => (
@@ -84,7 +79,7 @@ export function OnboardingPage() {
 
       <section className="settings-panel" aria-labelledby="onboarding-links">
         <h2 id="onboarding-links" className="text-lg font-semibold">
-          Google Cloud links
+          Google Cloud quick links
         </h2>
         <ul className="space-y-1 text-sm">
           <li>

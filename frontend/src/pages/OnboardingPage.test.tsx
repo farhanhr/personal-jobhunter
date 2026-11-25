@@ -42,7 +42,7 @@ describe('OnboardingPage', () => {
     vi.restoreAllMocks()
   })
 
-  it('shows the four steps, current status, and the Settings call to action', async () => {
+  it('shows the three streamlined steps, current status, and the Settings call to action', async () => {
     vi.stubGlobal('fetch', vi.fn(async () => json(pending)))
 
     renderPage()
@@ -50,10 +50,9 @@ describe('OnboardingPage', () => {
     expect(
       screen.getByRole('heading', { name: /set up your job workspace/i }),
     ).toBeInTheDocument()
-    expect(screen.getByText(/1\. Create a Service Account key/)).toBeInTheDocument()
-    expect(screen.getByText(/2\. Share the spreadsheet/)).toBeInTheDocument()
-    expect(screen.getByText(/3\. Validate and prepare/)).toBeInTheDocument()
-    expect(screen.getByText(/4\. Start using the dashboard/)).toBeInTheDocument()
+    expect(screen.getByText(/1\. Upload your Service Account JSON/)).toBeInTheDocument()
+    expect(screen.getByText(/2\. Paste your Google Sheet link/)).toBeInTheDocument()
+    expect(screen.getByText(/3\. Start discovering jobs/)).toBeInTheDocument()
     expect(await screen.findByText(pending.message)).toBeInTheDocument()
     expect(screen.getByRole('link', { name: 'Open Settings' })).toHaveAttribute(
       'href',
