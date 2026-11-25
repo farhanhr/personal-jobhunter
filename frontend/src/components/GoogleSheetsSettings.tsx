@@ -2,7 +2,6 @@ import { useEffect, useRef, useState, type FormEvent } from 'react'
 import { Link } from 'react-router'
 import {
   disconnectServiceAccount,
-  exchangeSetupToken,
   fetchIntegrationStatus,
   GoogleSheetsSettingsError,
   runSaveAndSetup,
@@ -42,9 +41,7 @@ function stateLabel(status: IntegrationStatus): string {
 export function GoogleSheetsSettings() {
   const [status, setStatus] = useState<IntegrationStatus | null>(null)
   const [loadState, setLoadState] = useState<LoadState>({ status: 'loading' })
-  const [csrfToken, setCsrfToken] = useState<string | null>(null)
-  const [setupToken, setSetupToken] = useState('')
-  const [sessionError, setSessionError] = useState<string | null>(null)
+  const [selectedFile, setSelectedFile] = useState<File | null>(null)
   const [spreadsheetUrl, setSpreadsheetUrl] = useState('')
   const [busy, setBusy] = useState(false)
   const [message, setMessage] = useState<string | null>(null)
@@ -67,95 +64,64 @@ export function GoogleSheetsSettings() {
     return () => controller.abort()
   }, [])
 
-  async function handleSession(event: FormEvent<HTMLFormElement>) {
-    event.preventDefault()
-    setSessionError(null)
-    setBusy(true)
-    try {
-      const session = await exchangeSetupToken(setupToken.trim())
-      setCsrfToken(session.csrf_token)
-      setSetupToken('')
-    } catch (error) {
-      setSessionError(errorMessage(error))
-    } finally {
-      setBusy(false)
+  function resetFile() {
+    setSelectedFile(null)
+    if (fileInput.current) {
+      fileInput.current.value = ''
     }
   }
 
-  async function run<T>(
-    action: (token: string) => Promise<T>,
-    after: (value: T) => void,
-    onError?: () => void,
-  ) {
-    if (!csrfToken) {
-      setActionError('Unlock this section with the local setup token first.')
+  async function refreshStatus() {
+    try {
+      setStatus(await fetchIntegrationStatus())
+    } catch {
+      // Keep the last known status; the next action reports the real failure.
+    }
+  }
+
+  async function handleConnect(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault()
+    if (!selectedFile && !status?.key_installed) {
+      setActionError('Choose the Service Account JSON file first.')
       return
     }
     setBusy(true)
     setActionError(null)
+    setMessage(null)
+    setOutcome(null)
     try {
-      after(await action(csrfToken))
-    } catch (error) {
-      if (error instanceof GoogleSheetsSettingsError && error.code === 'setup_session_required') {
-        setCsrfToken(null)
+      if (selectedFile) {
+        setStatus(await uploadServiceAccountKey(selectedFile))
+        setMessage('Service Account key saved.')
+        resetFile()
       }
+      const result = await runSaveAndSetup(spreadsheetUrl.trim() || undefined)
+      setOutcome(result)
+      if (result.ready) {
+        setSpreadsheetUrl('')
+      }
+      await refreshStatus()
+    } catch (error) {
       setActionError(errorMessage(error))
-      onError?.()
+      await refreshStatus()
     } finally {
       setBusy(false)
     }
   }
 
-  function handleUpload(event: FormEvent<HTMLFormElement>) {
-    event.preventDefault()
-    const file = fileInput.current?.files?.[0]
-    if (!file) {
-      setActionError('Choose the Service Account JSON file first.')
-      return
+  async function handleDisconnect() {
+    setBusy(true)
+    setActionError(null)
+    try {
+      setStatus(await disconnectServiceAccount())
+      setOutcome(null)
+      setMessage('Service Account key removed.')
+      resetFile()
+    } catch (error) {
+      setActionError(errorMessage(error))
+    } finally {
+      setBusy(false)
     }
-    void run(
-      (token) => uploadServiceAccountKey(file, token),
-      (next) => {
-        setStatus(next)
-        setMessage('Service Account key saved.')
-        setOutcome(null)
-        if (fileInput.current) {
-          fileInput.current.value = ''
-        }
-      },
-      () => {
-        // A rejected replacement can invalidate the workspace the previous
-        // credential validated, so the displayed verdict must be refreshed
-        // instead of keeping a stale "Ready".
-        void fetchIntegrationStatus().then(setStatus).catch(() => undefined)
-      },
-    )
-  }
-
-  function handleSetup(event: FormEvent<HTMLFormElement>) {
-    event.preventDefault()
-    void run(
-      (token) => runSaveAndSetup(spreadsheetUrl.trim() || undefined, token),
-      (result) => {
-        setOutcome(result)
-        setMessage(null)
-        if (result.ready) {
-          setSpreadsheetUrl('')
-        }
-        void fetchIntegrationStatus().then(setStatus).catch(() => undefined)
-      },
-    )
-  }
-
-  function handleDisconnect() {
-    void run(
-      (token) => disconnectServiceAccount(token),
-      (next) => {
-        setStatus(next)
-        setOutcome(null)
-        setMessage('Service Account key removed.')
-      },
-    )
   }
 
   return (
@@ -173,96 +139,120 @@ export function GoogleSheetsSettings() {
       {loadState.status === 'error' ? <p role="alert">{loadState.message}</p> : null}
 
       {status ? (
-        <dl className="grid grid-cols-[max-content_1fr] gap-x-4 gap-y-1 text-sm">
-          <dt className="font-medium">Status</dt>
-          <dd>{stateLabel(status)}</dd>
-          <dt className="font-medium">Message</dt>
-          <dd>{status.message}</dd>
-          {status.configuration_error ? (
-            <>
-              <dt className="font-medium">Configuration error</dt>
-              <dd role="alert">
-                {status.configuration_error === 'spreadsheet_url_invalid'
-                  ? 'The spreadsheet link in your .env file is not a valid Google Sheets URL. Fix it or run Save & Setup with a valid URL.'
-                  : `Configuration problem: ${status.configuration_error}`}
-              </dd>
-            </>
-          ) : null}
+        <div className="space-y-3">
+          <ul className="grid gap-2 sm:grid-cols-3">
+            <li className="rounded-md border p-3 text-sm">
+              <p className="font-medium">Service Account</p>
+              {status.key_installed ? (
+                <p className="break-all">
+                  {status.service_account_email ? (
+                    <span data-testid="service-account-email">{status.service_account_email}</span>
+                  ) : (
+                    'Key installed'
+                  )}
+                  {status.service_account_email ? (
+                    <CopyEmailButton email={status.service_account_email} />
+                  ) : null}
+                </p>
+              ) : (
+                <p className="text-muted-foreground">Not uploaded</p>
+              )}
+            </li>
+            <li className="rounded-md border p-3 text-sm">
+              <p className="font-medium">Spreadsheet</p>
+              <p className={status.spreadsheet_configured ? undefined : 'text-muted-foreground'}>
+                {status.spreadsheet_configured ? 'Connected' : 'Not connected'}
+              </p>
+            </li>
+            <li className="rounded-md border p-3 text-sm">
+              <p className="font-medium">Workspace</p>
+              <p className={status.workspace_ready ? undefined : 'text-muted-foreground'}>
+                {status.workspace_ready ? 'Ready' : stateLabel(status)}
+              </p>
+            </li>
+          </ul>
+
+          <p className="text-sm">{status.message}</p>
           {status.service_account_email ? (
-            <>
-              <dt className="font-medium">Service Account email</dt>
-              <dd className="break-all">
-                <span data-testid="service-account-email">{status.service_account_email}</span>
-                <CopyEmailButton email={status.service_account_email} />
-              </dd>
-              <dt className="font-medium">Sharing</dt>
-              <dd>
-                Share the spreadsheet with this email and give it Editor access.
-              </dd>
-            </>
+            <p className="text-sm text-muted-foreground">
+              Share the spreadsheet with this email and give it Editor access.
+            </p>
           ) : null}
-        </dl>
+          {status.configuration_error ? (
+            <p role="alert" className="text-sm">
+              {status.configuration_error === 'spreadsheet_url_invalid'
+                ? 'The spreadsheet link in your .env file is not a valid Google Sheets URL. Fix it or run Save & Connect with a valid URL.'
+                : `Configuration problem: ${status.configuration_error}`}
+            </p>
+          ) : null}
+        </div>
       ) : null}
 
-      {!csrfToken ? (
-        <form onSubmit={handleSession} className="space-y-2">
-          <Label htmlFor="setup-token">Local setup token</Label>
+      <form onSubmit={handleConnect} className="space-y-4">
+        <div
+          className="space-y-2 rounded-md border border-dashed p-4"
+          onDragOver={(event) => event.preventDefault()}
+          onDrop={(event) => {
+            event.preventDefault()
+            const file = event.dataTransfer.files?.[0]
+            if (file) {
+              setSelectedFile(file)
+              if (fileInput.current) {
+                fileInput.current.value = ''
+              }
+            }
+          }}
+        >
+          <Label htmlFor="service-account-file">Upload Service Account JSON</Label>
           <p className="text-sm text-muted-foreground">
-            Paste the one-time token from the file the server wrote to your local data folder.
-            It works once and expires after 30 minutes.
+            Drag the downloaded JSON key here, or choose it below. It is stored only on this
+            computer, readable only by you.
           </p>
           <Input
-            id="setup-token"
-            name="setup-token"
-            type="password"
-            autoComplete="off"
-            value={setupToken}
-            onChange={(event) => setSetupToken(event.target.value)}
+            id="service-account-file"
+            ref={fileInput}
+            type="file"
+            accept="application/json,.json"
+            onChange={(event) => setSelectedFile(event.target.files?.[0] ?? null)}
           />
-          <button type="submit" disabled={busy || setupToken.trim().length === 0}>
-            Unlock setup
-          </button>
-          {sessionError ? <p role="alert">{sessionError}</p> : null}
-        </form>
-      ) : (
-        <div className="space-y-6">
-          <form onSubmit={handleUpload} className="space-y-2">
-            <Label htmlFor="service-account-file">Service Account JSON key</Label>
-            <Input
-              id="service-account-file"
-              ref={fileInput}
-              type="file"
-              accept="application/json,.json"
-            />
-            <button type="submit" disabled={busy}>
-              {status?.key_installed ? 'Replace key' : 'Upload key'}
-            </button>
-          </form>
-
-          <form onSubmit={handleSetup} className="space-y-2">
-            <Label htmlFor="spreadsheet-url">Google Spreadsheet URL</Label>
-            <p className="text-sm text-muted-foreground">
-              Paste the link of an empty spreadsheet, or one this application used before. An
-              incompatible spreadsheet is never modified.
-            </p>
-            <Input
-              id="spreadsheet-url"
-              type="url"
-              placeholder="https://docs.google.com/spreadsheets/d/…"
-              value={spreadsheetUrl}
-              onChange={(event) => setSpreadsheetUrl(event.target.value)}
-            />
-            <div className="flex flex-wrap gap-2">
-              <button type="submit" disabled={busy}>
-                Save &amp; Setup
-              </button>
-              <button type="button" onClick={handleDisconnect} disabled={busy}>
-                Disconnect
-              </button>
-            </div>
-          </form>
+          {selectedFile ? (
+            <p className="text-sm text-muted-foreground">Selected: {selectedFile.name}</p>
+          ) : null}
         </div>
-      )}
+
+        <div className="space-y-2">
+          <Label htmlFor="spreadsheet-url">Google Spreadsheet URL</Label>
+          <p className="text-sm text-muted-foreground">
+            Paste the link of an empty spreadsheet, or one this application used before. An
+            incompatible spreadsheet is never modified.
+          </p>
+          <Input
+            id="spreadsheet-url"
+            type="url"
+            placeholder="https://docs.google.com/spreadsheets/d/…"
+            value={spreadsheetUrl}
+            onChange={(event) => setSpreadsheetUrl(event.target.value)}
+          />
+        </div>
+
+        <div className="flex flex-wrap gap-2">
+          <button
+            type="submit"
+            className="button-primary"
+            disabled={busy || (!selectedFile && !status?.key_installed)}
+          >
+            {busy ? 'Connecting…' : 'Save & Connect Workspace'}
+          </button>
+          <button
+            type="button"
+            className="button-secondary"
+            onClick={() => void handleDisconnect()}
+            disabled={busy || !status?.key_installed}
+          >
+            Disconnect
+          </button>
+        </div>
+      </form>
 
       {message ? <p role="status">{message}</p> : null}
       {actionError ? <p role="alert">{actionError}</p> : null}

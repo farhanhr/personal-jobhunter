@@ -108,43 +108,24 @@ export async function fetchIntegrationStatus(signal?: AbortSignal): Promise<Inte
   return expectJson<IntegrationStatus>(response)
 }
 
-export async function exchangeSetupToken(token: string): Promise<{ csrf_token: string }> {
-  const response = await fetch(`${BASE}/session`, {
-    method: 'POST',
-    headers: { Accept: 'application/json', 'Content-Type': 'application/json' },
-    body: JSON.stringify({ token }),
-    credentials: 'same-origin',
-  })
-  return expectJson<{ csrf_token: string }>(response)
-}
-
-export async function uploadServiceAccountKey(
-  file: File,
-  csrfToken: string,
-): Promise<IntegrationStatus> {
+export async function uploadServiceAccountKey(file: File): Promise<IntegrationStatus> {
+  const body = new FormData()
+  body.append('file', file)
   const response = await fetch(`${BASE}/service-account`, {
     method: 'PUT',
-    headers: {
-      Accept: 'application/json',
-      'Content-Type': 'application/json',
-      'X-PJF-Setup-Token': csrfToken,
-    },
-    body: file,
+    headers: { Accept: 'application/json' },
+    body,
     credentials: 'same-origin',
   })
   return expectJson<IntegrationStatus>(response)
 }
 
-export async function runSaveAndSetup(
-  spreadsheetUrl: string | undefined,
-  csrfToken: string,
-): Promise<SetupOutcome> {
+export async function runSaveAndSetup(spreadsheetUrl: string | undefined): Promise<SetupOutcome> {
   const response = await fetch(`${BASE}/setup`, {
     method: 'POST',
     headers: {
       Accept: 'application/json',
       'Content-Type': 'application/json',
-      'X-PJF-Setup-Token': csrfToken,
     },
     body: JSON.stringify(spreadsheetUrl ? { spreadsheet_url: spreadsheetUrl } : {}),
     credentials: 'same-origin',
@@ -152,10 +133,10 @@ export async function runSaveAndSetup(
   return expectJson<SetupOutcome>(response)
 }
 
-export async function disconnectServiceAccount(csrfToken: string): Promise<IntegrationStatus> {
+export async function disconnectServiceAccount(): Promise<IntegrationStatus> {
   const response = await fetch(`${BASE}/service-account`, {
     method: 'DELETE',
-    headers: { Accept: 'application/json', 'X-PJF-Setup-Token': csrfToken },
+    headers: { Accept: 'application/json' },
     credentials: 'same-origin',
   })
   return expectJson<IntegrationStatus>(response)

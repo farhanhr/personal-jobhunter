@@ -73,9 +73,6 @@ function routes(
     if (key === 'GET /api/v1/integrations/google-sheets/status') {
       return json(statusBody)
     }
-    if (key === 'POST /api/v1/integrations/google-sheets/session') {
-      return json({ csrf_token: 'csrf-synthetic', expires_at: '2026-11-21T20:00:00+00:00' })
-    }
     throw new Error(`Unexpected request: ${key}`)
   })
 }
@@ -88,10 +85,16 @@ function renderSettings() {
   )
 }
 
-async function unlock(user: ReturnType<typeof userEvent.setup>) {
-  await user.type(await screen.findByLabelText('Local setup token'), 'token-synthetic-value')
-  await user.click(screen.getByRole('button', { name: 'Unlock setup' }))
-  await screen.findByLabelText('Service Account JSON key')
+async function chooseKey(user: ReturnType<typeof userEvent.setup>) {
+  await user.upload(
+    await screen.findByLabelText('Upload Service Account JSON'),
+    new File([SYNTHETIC_KEY], 'key.json', { type: 'application/json' }),
+  )
+}
+
+function uploadedFile(init: RequestInit): File | null {
+  const body = init.body
+  return body instanceof FormData ? (body.get('file') as File | null) : null
 }
 
 describe('GoogleSheetsSettings', () => {
@@ -102,95 +105,146 @@ describe('GoogleSheetsSettings', () => {
     localStorage.clear()
   })
 
-  it('shows not-configured status and requires a setup token before any mutation', async () => {
+  it('shows direct setup controls without asking for a local setup token', async () => {
     vi.stubGlobal('fetch', routes())
 
     renderSettings()
 
     expect(await screen.findByText('Not configured')).toBeInTheDocument()
-    expect(screen.queryByLabelText('Service Account JSON key')).not.toBeInTheDocument()
+    expect(screen.getByLabelText('Upload Service Account JSON')).toBeInTheDocument()
+    expect(screen.getByLabelText('Google Spreadsheet URL')).toBeInTheDocument()
+    expect(screen.queryByLabelText('Local setup token')).not.toBeInTheDocument()
+    expect(screen.queryByRole('button', { name: 'Unlock setup' })).not.toBeInTheDocument()
+    expect(
+      screen.getByRole('button', { name: 'Save & Connect Workspace' }),
+    ).toBeDisabled()
   })
 
-  it('unlocks with the one-time token and sends the CSRF header on upload', async () => {
+  it('uploads the key as multipart form data and connects the workspace', async () => {
     const fetchMock = routes({
       'PUT /api/v1/integrations/google-sheets/service-account': () => json(awaiting),
+      'POST /api/v1/integrations/google-sheets/setup': () =>
+        json({
+          ready: true,
+          stage: null,
+          code: 'ready',
+          message: 'Google Sheets is connected and ready.',
+          service_account_email: SYNTHETIC_EMAIL,
+          source: 'ui',
+          retry_safe: true,
+          preserved: 'Nothing was changed.',
+          optional_warning: null,
+          workspace_ready: true,
+          adopted_existing: false,
+          refresh_warning: null,
+          counts: { opportunities: 1 },
+        }),
+      'GET /api/v1/integrations/google-sheets/status': () => json(ready),
     })
     vi.stubGlobal('fetch', fetchMock)
     const user = userEvent.setup()
 
     renderSettings()
-    await unlock(user)
+    await chooseKey(user)
+    await user.type(screen.getByLabelText('Google Spreadsheet URL'), SYNTHETIC_URL)
+    await user.click(screen.getByRole('button', { name: 'Save & Connect Workspace' }))
 
-    const file = new File([SYNTHETIC_KEY], 'key.json', { type: 'application/json' })
-    await user.upload(screen.getByLabelText('Service Account JSON key'), file)
-    await user.click(screen.getByRole('button', { name: 'Upload key' }))
+    expect((await screen.findAllByText('Ready')).length).toBeGreaterThan(0)
+    expect(screen.getByTestId('service-account-email')).toHaveTextContent(SYNTHETIC_EMAIL)
 
-    await waitFor(() =>
-      expect(screen.getByTestId('service-account-email')).toHaveTextContent(SYNTHETIC_EMAIL),
-    )
     const upload = fetchMock.mock.calls.find(
       ([input]) => String(input).endsWith('/service-account'),
     )
     const init = upload?.[1] as RequestInit
     expect(init.method).toBe('PUT')
-    expect((init.headers as Record<string, string>)['X-PJF-Setup-Token']).toBe('csrf-synthetic')
+    expect(uploadedFile(init)?.name).toBe('key.json')
+    expect((init.headers as Record<string, string>)['X-PJF-Setup-Token']).toBeUndefined()
+
+    const setup = fetchMock.mock.calls.find(
+      ([input, config]) =>
+        String(input).endsWith('/setup') && (config as RequestInit | undefined)?.method === 'POST',
+    )
+    const setupInit = setup?.[1] as RequestInit | undefined
+    expect(JSON.parse(String(setupInit?.body))).toEqual({
+      spreadsheet_url: SYNTHETIC_URL,
+    })
   })
 
-  it('uploads a key downloaded with the original Google Cloud filename', async () => {
-    const fetchMock = routes({
-      'PUT /api/v1/integrations/google-sheets/service-account': () => json(awaiting),
-    })
+  it('uses an already installed key when only a spreadsheet URL is saved', async () => {
+    let statusCalls = 0
+    const fetchMock = routes(
+      {
+        'POST /api/v1/integrations/google-sheets/setup': () =>
+          json({
+            ready: true,
+            stage: null,
+            code: 'ready',
+            message: 'Google Sheets is connected and ready.',
+            service_account_email: SYNTHETIC_EMAIL,
+            source: 'ui',
+            retry_safe: true,
+            preserved: 'Nothing was changed.',
+            optional_warning: null,
+            workspace_ready: true,
+            adopted_existing: false,
+            refresh_warning: null,
+            counts: null,
+          }),
+        'GET /api/v1/integrations/google-sheets/status': () =>
+          json(statusCalls++ === 0 ? awaiting : ready),
+      },
+      awaiting,
+    )
     vi.stubGlobal('fetch', fetchMock)
     const user = userEvent.setup()
 
     renderSettings()
-    await unlock(user)
+    await screen.findByText('Awaiting spreadsheet')
+    await user.type(screen.getByLabelText('Google Spreadsheet URL'), SYNTHETIC_URL)
+    await user.click(screen.getByRole('button', { name: 'Save & Connect Workspace' }))
 
-    const file = new File([SYNTHETIC_KEY], 'example-project-000000-abcdef0123.json', {
-      type: 'application/json',
-    })
-    await user.upload(screen.getByLabelText('Service Account JSON key'), file)
-    await user.click(screen.getByRole('button', { name: 'Upload key' }))
-
-    await waitFor(() =>
-      expect(screen.getByTestId('service-account-email')).toHaveTextContent(SYNTHETIC_EMAIL),
-    )
-    const upload = fetchMock.mock.calls.find(
-      ([input]) => String(input).endsWith('/service-account'),
-    )
-    const init = upload?.[1] as RequestInit
-    // The downloaded name never leaves the browser: the key itself is the body.
-    expect(init.body).toBe(file)
-    expect((init.headers as Record<string, string>)['Content-Disposition']).toBeUndefined()
-    expect((init.headers as Record<string, string>)['Content-Type']).toBe('application/json')
+    expect((await screen.findAllByText('Ready')).length).toBeGreaterThan(0)
+    expect(
+      fetchMock.mock.calls.some(([input]) => String(input).endsWith('/service-account')),
+    ).toBe(false)
   })
 
-  it('accepts an arbitrary alternative JSON filename', async () => {
-    const fetchMock = routes({
-      'PUT /api/v1/integrations/google-sheets/service-account': () => json(awaiting),
-    })
-    vi.stubGlobal('fetch', fetchMock)
+  it('never stores or renders the private key in the DOM or browser storage', async () => {
+    vi.stubGlobal(
+      'fetch',
+      routes({
+        'PUT /api/v1/integrations/google-sheets/service-account': () => json(awaiting),
+        'POST /api/v1/integrations/google-sheets/setup': () =>
+          json({
+            ready: false,
+            stage: 'access',
+            code: 'permission_denied',
+            message: 'Share the spreadsheet with the Service Account.',
+            service_account_email: SYNTHETIC_EMAIL,
+            source: 'ui',
+            retry_safe: true,
+            preserved: 'Nothing was changed.',
+            optional_warning: null,
+            workspace_ready: false,
+            adopted_existing: false,
+            refresh_warning: null,
+            counts: null,
+          }),
+        },
+        awaiting,
+      ),
+    )
     const user = userEvent.setup()
 
     renderSettings()
-    await unlock(user)
+    await chooseKey(user)
+    await user.click(screen.getByRole('button', { name: 'Save & Connect Workspace' }))
+    await screen.findByTestId('service-account-email')
 
-    const file = new File([SYNTHETIC_KEY], 'my-backup-copy.json', {
-      type: 'application/json',
-    })
-    await user.upload(screen.getByLabelText('Service Account JSON key'), file)
-    await user.click(screen.getByRole('button', { name: 'Upload key' }))
-
-    await waitFor(() =>
-      expect(screen.getByTestId('service-account-email')).toHaveTextContent(SYNTHETIC_EMAIL),
-    )
-    const upload = fetchMock.mock.calls.find(
-      ([input]) => String(input).endsWith('/service-account'),
-    )
-    const init = upload?.[1] as RequestInit
-    // The name never reaches the server: the key itself is the whole body.
-    expect(init.body).toBe(file)
-    expect((init.headers as Record<string, string>)['Content-Disposition']).toBeUndefined()
+    expect(document.body.innerHTML).not.toContain('BEGIN PRIVATE KEY')
+    expect(JSON.stringify({ ...localStorage })).not.toContain('PRIVATE KEY')
+    expect(JSON.stringify({ ...sessionStorage })).not.toContain('PRIVATE KEY')
+    expect(screen.getByLabelText('Upload Service Account JSON')).toHaveValue('')
   })
 
   it('refreshes the status after a rejected upload so a stale ready state is not shown', async () => {
@@ -224,13 +278,8 @@ describe('GoogleSheetsSettings', () => {
 
     renderSettings()
     await screen.findByText('Ready')
-    await unlock(user)
-
-    const file = new File([SYNTHETIC_KEY], 'example-project-000000-abcdef0123.json', {
-      type: 'application/json',
-    })
-    await user.upload(screen.getByLabelText('Service Account JSON key'), file)
-    await user.click(screen.getByRole('button', { name: 'Replace key' }))
+    await chooseKey(user)
+    await user.click(screen.getByRole('button', { name: 'Save & Connect Workspace' }))
 
     expect(
       await screen.findByText(/Share it with pjf-writer@pjf-test-project\.iam\.gserviceaccount\.com/),
@@ -240,71 +289,9 @@ describe('GoogleSheetsSettings', () => {
     expect(screen.queryByText('Ready')).not.toBeInTheDocument()
   })
 
-  it('never stores or renders the private key in the DOM or browser storage', async () => {
-    vi.stubGlobal(
-      'fetch',
-      routes({
-        'PUT /api/v1/integrations/google-sheets/service-account': () => json(awaiting),
-      }),
-    )
-    const user = userEvent.setup()
-
-    renderSettings()
-    await unlock(user)
-    await user.upload(
-      screen.getByLabelText('Service Account JSON key'),
-      new File([SYNTHETIC_KEY], 'key.json', { type: 'application/json' }),
-    )
-    await user.click(screen.getByRole('button', { name: 'Upload key' }))
-    await screen.findByTestId('service-account-email')
-
-    expect(document.body.innerHTML).not.toContain('BEGIN PRIVATE KEY')
-    expect(JSON.stringify({ ...localStorage })).not.toContain('PRIVATE KEY')
-    expect(JSON.stringify({ ...sessionStorage })).not.toContain('PRIVATE KEY')
-    expect(screen.getByLabelText('Service Account JSON key')).toHaveValue('')
-  })
-
   it('sends the pasted spreadsheet URL in the setup body', async () => {
-    const fetchMock = routes({
-      'POST /api/v1/integrations/google-sheets/setup': () =>
-        json({
-          ready: false,
-          stage: 'access',
-          code: 'permission_denied',
-          message: `Share the spreadsheet with ${SYNTHETIC_EMAIL} as Editor, then retry.`,
-          service_account_email: SYNTHETIC_EMAIL,
-          source: 'ui',
-          retry_safe: true,
-          preserved: 'Nothing was changed.',
-          optional_warning: null,
-          workspace_ready: false,
-          adopted_existing: false,
-          refresh_warning: null,
-          counts: null,
-        }),
-      'GET /api/v1/integrations/google-sheets/status': () => json(awaiting),
-    })
-    vi.stubGlobal('fetch', fetchMock)
-    const user = userEvent.setup()
-
-    renderSettings()
-    await unlock(user)
-    await user.type(screen.getByLabelText('Google Spreadsheet URL'), SYNTHETIC_URL)
-    await user.click(screen.getByRole('button', { name: 'Save & Setup' }))
-
-    await screen.findByText('Setup stopped at access')
-    const setup = fetchMock.mock.calls.find(
-      ([input, init]) =>
-        String(input).endsWith('/setup') && (init as RequestInit | undefined)?.method === 'POST',
-    )
-    const init = setup?.[1] as RequestInit
-    expect(JSON.parse(String(init.body))).toEqual({ spreadsheet_url: SYNTHETIC_URL })
-  })
-
-  it('shows permission guidance with the Service Account email after a failed setup', async () => {
-    vi.stubGlobal(
-      'fetch',
-      routes({
+    const fetchMock = routes(
+      {
         'POST /api/v1/integrations/google-sheets/setup': () =>
           json({
             ready: false,
@@ -322,13 +309,57 @@ describe('GoogleSheetsSettings', () => {
             counts: null,
           }),
         'GET /api/v1/integrations/google-sheets/status': () => json(awaiting),
-      }),
+      },
+      awaiting,
+    )
+    vi.stubGlobal('fetch', fetchMock)
+    const user = userEvent.setup()
+
+    renderSettings()
+    await screen.findByText('Awaiting spreadsheet')
+    await user.type(screen.getByLabelText('Google Spreadsheet URL'), SYNTHETIC_URL)
+    await user.click(screen.getByRole('button', { name: 'Save & Connect Workspace' }))
+
+    await screen.findByText('Setup stopped at access')
+    const setup = fetchMock.mock.calls.find(
+      ([input, init]) =>
+        String(input).endsWith('/setup') && (init as RequestInit | undefined)?.method === 'POST',
+    )
+    const init = setup?.[1] as RequestInit
+    expect(JSON.parse(String(init.body))).toEqual({ spreadsheet_url: SYNTHETIC_URL })
+  })
+
+  it('shows permission guidance with the Service Account email after a failed setup', async () => {
+    vi.stubGlobal(
+      'fetch',
+      routes(
+        {
+          'POST /api/v1/integrations/google-sheets/setup': () =>
+            json({
+              ready: false,
+              stage: 'access',
+              code: 'permission_denied',
+              message: `Share the spreadsheet with ${SYNTHETIC_EMAIL} as Editor, then retry.`,
+              service_account_email: SYNTHETIC_EMAIL,
+              source: 'ui',
+              retry_safe: true,
+              preserved: 'Nothing was changed.',
+              optional_warning: null,
+              workspace_ready: false,
+              adopted_existing: false,
+              refresh_warning: null,
+              counts: null,
+            }),
+          'GET /api/v1/integrations/google-sheets/status': () => json(awaiting),
+        },
+        awaiting,
+      ),
     )
     const user = userEvent.setup()
 
     renderSettings()
-    await unlock(user)
-    await user.click(screen.getByRole('button', { name: 'Save & Setup' }))
+    await screen.findByText('Awaiting spreadsheet')
+    await user.click(screen.getByRole('button', { name: 'Save & Connect Workspace' }))
 
     expect(await screen.findByText('Setup stopped at access')).toBeInTheDocument()
     expect(screen.getAllByText(/Share the spreadsheet/).length).toBeGreaterThan(0)
@@ -337,31 +368,34 @@ describe('GoogleSheetsSettings', () => {
   it('reports a ready state, adopted counts, and a dashboard link', async () => {
     vi.stubGlobal(
       'fetch',
-      routes({
-        'POST /api/v1/integrations/google-sheets/setup': () =>
-          json({
-            ready: true,
-            stage: null,
-            code: 'ready',
-            message: 'Google Sheets is connected and ready.',
-            service_account_email: SYNTHETIC_EMAIL,
-            source: 'ui',
-            retry_safe: true,
-            preserved: 'Nothing was changed.',
-            optional_warning: null,
-            workspace_ready: true,
-            adopted_existing: true,
-            refresh_warning: null,
-            counts: { opportunities: 12, job_sources: 3 },
-          }),
-        'GET /api/v1/integrations/google-sheets/status': () => json(ready),
-      }),
+      routes(
+        {
+          'POST /api/v1/integrations/google-sheets/setup': () =>
+            json({
+              ready: true,
+              stage: null,
+              code: 'ready',
+              message: 'Google Sheets is connected and ready.',
+              service_account_email: SYNTHETIC_EMAIL,
+              source: 'ui',
+              retry_safe: true,
+              preserved: 'Nothing was changed.',
+              optional_warning: null,
+              workspace_ready: true,
+              adopted_existing: true,
+              refresh_warning: null,
+              counts: { opportunities: 12, job_sources: 3 },
+            }),
+          'GET /api/v1/integrations/google-sheets/status': () => json(ready),
+        },
+        ready,
+      ),
     )
     const user = userEvent.setup()
 
     renderSettings()
-    await unlock(user)
-    await user.click(screen.getByRole('button', { name: 'Save & Setup' }))
+    await screen.findByText('Ready')
+    await user.click(screen.getByRole('button', { name: 'Save & Connect Workspace' }))
 
     const adopted = await screen.findByText('Adopted an existing workspace and kept its rows.')
     const region = adopted.closest('[role="status"]') as HTMLElement
@@ -376,29 +410,32 @@ describe('GoogleSheetsSettings', () => {
   it('explains that an incompatible spreadsheet was not changed', async () => {
     vi.stubGlobal(
       'fetch',
-      routes({
-        'POST /api/v1/integrations/google-sheets/setup': () =>
-          json(
-            {
-              error: {
-                code: 'workspace_incompatible',
-                message:
-                  'This spreadsheet is not a Personal JobHunter workspace. Nothing was changed.',
-                details: {
-                  preserved:
-                    'Nothing was changed in the spreadsheet or the active configuration.',
+      routes(
+        {
+          'POST /api/v1/integrations/google-sheets/setup': () =>
+            json(
+              {
+                error: {
+                  code: 'workspace_incompatible',
+                  message:
+                    'This spreadsheet is not a Personal JobHunter workspace. Nothing was changed.',
+                  details: {
+                    preserved:
+                      'Nothing was changed in the spreadsheet or the active configuration.',
+                  },
                 },
               },
-            },
-            409,
-          ),
-      }),
+              409,
+            ),
+        },
+        ready,
+      ),
     )
     const user = userEvent.setup()
 
     renderSettings()
-    await unlock(user)
-    await user.click(screen.getByRole('button', { name: 'Save & Setup' }))
+    await screen.findByText('Ready')
+    await user.click(screen.getByRole('button', { name: 'Save & Connect Workspace' }))
 
     expect(await screen.findByRole('alert')).toHaveTextContent('Nothing was changed')
   })
@@ -406,41 +443,29 @@ describe('GoogleSheetsSettings', () => {
   it('asks the user to reconnect when the key is gone after setup', async () => {
     vi.stubGlobal(
       'fetch',
-      routes({
-        'GET /api/v1/integrations/google-sheets/status': () =>
-          json({
-            ...ready,
-            key_installed: false,
-            message:
-              'The Service Account key is missing. Restore it in Settings to resume synchronization; cached data remains readable.',
-          }),
-      }),
+      routes(
+        {
+          'GET /api/v1/integrations/google-sheets/status': () =>
+            json({
+              ...ready,
+              key_installed: false,
+              message:
+                'The Service Account key is missing. Restore it in Settings to resume synchronization; cached data remains readable.',
+            }),
+        },
+        {
+          ...ready,
+          key_installed: false,
+          message:
+            'The Service Account key is missing. Restore it in Settings to resume synchronization; cached data remains readable.',
+        },
+      ),
     )
 
     renderSettings()
 
-    expect(await screen.findByText('Ready')).toBeInTheDocument()
+    expect((await screen.findAllByText('Ready')).length).toBeGreaterThan(0)
     expect(screen.getAllByText(/Restore it in Settings/).length).toBeGreaterThan(0)
-  })
-
-  it('an expired session returns the user to the token prompt', async () => {
-    vi.stubGlobal(
-      'fetch',
-      routes({
-        'POST /api/v1/integrations/google-sheets/setup': () =>
-          json(
-            { error: { code: 'setup_session_required', message: 'Unlock again.', details: {} } },
-            401,
-          ),
-      }),
-    )
-    const user = userEvent.setup()
-
-    renderSettings()
-    await unlock(user)
-    await user.click(screen.getByRole('button', { name: 'Save & Setup' }))
-
-    expect(await screen.findByLabelText('Local setup token')).toBeInTheDocument()
   })
 
   it('surfaces an invalid .env spreadsheet URL as a configuration error', async () => {
@@ -457,49 +482,54 @@ describe('GoogleSheetsSettings', () => {
   it('renders a refresh warning as an alert after a successful setup', async () => {
     vi.stubGlobal(
       'fetch',
-      routes({
-        'POST /api/v1/integrations/google-sheets/setup': () =>
-          json({
-            ready: true,
-            stage: null,
-            code: 'ready',
-            message: 'Google Sheets is connected and ready.',
-            service_account_email: SYNTHETIC_EMAIL,
-            source: 'ui',
-            retry_safe: true,
-            preserved: 'Nothing was changed.',
-            optional_warning: null,
-            workspace_ready: true,
-            adopted_existing: true,
-            refresh_warning: 'Local data refresh failed; retry later.',
-            counts: { opportunities: 12, job_sources: 3 },
-          }),
-      }),
+      routes(
+        {
+          'POST /api/v1/integrations/google-sheets/setup': () =>
+            json({
+              ready: true,
+              stage: null,
+              code: 'ready',
+              message: 'Google Sheets is connected and ready.',
+              service_account_email: SYNTHETIC_EMAIL,
+              source: 'ui',
+              retry_safe: true,
+              preserved: 'Nothing was changed.',
+              optional_warning: null,
+              workspace_ready: true,
+              adopted_existing: true,
+              refresh_warning: 'Local data refresh failed; retry later.',
+              counts: { opportunities: 12, job_sources: 3 },
+            }),
+          'GET /api/v1/integrations/google-sheets/status': () => json(ready),
+        },
+        ready,
+      ),
     )
     const user = userEvent.setup()
 
     renderSettings()
-    await unlock(user)
-    await user.click(screen.getByRole('button', { name: 'Save & Setup' }))
+    await screen.findByText('Ready')
+    await user.click(screen.getByRole('button', { name: 'Save & Connect Workspace' }))
 
     const alerts = await screen.findAllByRole('alert')
     expect(alerts.some((alert) => alert.textContent?.includes('refresh failed'))).toBe(true)
   })
 
   it('disconnect removes the key and refreshes the status from the backend', async () => {
-    const fetchMock = routes({
-      'DELETE /api/v1/integrations/google-sheets/service-account': () => json(notConfigured),
-    })
+    const fetchMock = routes(
+      {
+        'DELETE /api/v1/integrations/google-sheets/service-account': () => json(notConfigured),
+      },
+      ready,
+    )
     vi.stubGlobal('fetch', fetchMock)
     const user = userEvent.setup()
 
     renderSettings()
-    await unlock(user)
+    await screen.findByText('Ready')
     await user.click(screen.getByRole('button', { name: 'Disconnect' }))
 
-    await waitFor(() =>
-      expect(screen.getByText('Not configured')).toBeInTheDocument(),
-    )
+    await waitFor(() => expect(screen.getByText('Not configured')).toBeInTheDocument())
     const deletes = fetchMock.mock.calls.filter(
       ([input, init]) =>
         String(input).endsWith('/service-account') && (init?.method ?? 'GET') === 'DELETE',
