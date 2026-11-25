@@ -40,7 +40,7 @@ respond. Do not post the details themselves in a public issue.
 
 ## Please never include
 
-- Google Service Account keys (the JSON file), private keys, or setup tokens.
+- Google Service Account keys (the JSON file), private keys, or AI provider API keys.
 - Your spreadsheet ID, real job data, CVs, or application documents.
 - Recruiter names, email addresses, or other personal contact details.
 - Screenshots or logs that contain any of the above.
